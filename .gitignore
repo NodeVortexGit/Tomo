@@ -1,0 +1,25 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Secrets — never commit your real keys
+.env
+
+# Python speech venv + caches
+scripts/.venv/
+__pycache__/
+*.pyc
+
+# Runtime data (memory DB, audit log, cached audio, imported characters)
+# These normally live under ~/.local/share/tomo, but ignore any local copies:
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+command-audit.log
+last_tts.mp3
+mic.wav
+
+# Character models carry their own licences (see each .vrm's meta). Keep them
+# local unless the licence allows redistribution — then whitelist them here.
+assets/characters/*.vrm
+!assets/characters/female model.vrm

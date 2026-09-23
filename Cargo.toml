@@ -1,0 +1,47 @@
+# Workspace root for Tomo — an AI-driven VRM desktop companion for Linux.
+#
+# The project is split into two crates on purpose:
+#
+#   crates/tomo-core  — the "brain": config, SQLite memory, the OpenAI
+#                       tool-calling loop, the safe command executor and the
+#                       speech bridge. It has NO graphics dependencies, so it
+#                       compiles fast and can be unit-tested on its own
+#                       (`cargo test -p tomo-core`). This is the part that is
+#                       fully implemented.
+#
+#   crates/tomo-app   — the "body": the Bevy application that loads the VRM
+#                       model, opens the transparent always-on-top overlay,
+#                       walks the character across the screen and grows the
+#                       liquid chat window. It depends on tomo-core. The
+#                       rendering / windowing / movement pieces are scaffolded
+#                       with honest TODOs — they need iteration on real
+#                       hardware (see README.md → "What is done vs. what needs
+#                       work").
+#
+# Build everything:      cargo build --release
+# Build only the brain:  cargo build --release -p tomo-core
+# Check only the brain:  cargo check -p tomo-core
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/tomo-core",
+    "crates/tomo-app",
+]
+
+# Shared dependency versions live here so the two crates stay in lock-step.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "sync", "time", "fs", "io-util"] }
+
+[profile.release]
+# The VRM/Bevy build is large; these keep the release binary lean.
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

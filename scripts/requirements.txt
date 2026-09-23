@@ -1,0 +1,15 @@
+# Python dependencies for Tomo's speech helpers.
+# Installed into scripts/.venv by install.sh.
+
+# Text-to-speech: Microsoft Edge neural voices (free, no key required).
+edge-tts>=6.1.9
+
+# "Hey Tomo" (wake_word.py), fully offline: Vosk spots the wake phrase, Whisper
+# transcribes the request. install.sh downloads their models into
+# ~/.local/share/tomo/models.
+vosk>=0.3.41
+faster-whisper>=1.1
+
+# Speech-to-text with Google (stt_google.py, the fallback when the wake-word
+# listener is off) uses only the Python standard library, so nothing is needed
+# here for it.

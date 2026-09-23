@@ -1,0 +1,68 @@
+[package]
+name = "tomo-app"
+version = "0.1.0"
+edition = "2021"
+description = "The body of Tomo: the Bevy app that renders the VRM character, walks it across a transparent desktop overlay, and grows the liquid chat window. Depends on tomo-core for all decision-making."
+license = "MIT"
+
+[[bin]]
+name = "tomo"
+path = "src/main.rs"
+
+[dependencies]
+tomo-core = { path = "../tomo-core" }
+
+anyhow = { workspace = true }
+tracing = { workspace = true }
+# Reads the humanoid rig and expressions out of the .vrm's glTF JSON.
+serde_json = { workspace = true }
+# The bridge names the tokio channel types exposed by tomo_core::BrainHandle
+# (UnboundedSender / UnboundedReceiver / TryRecvError), so the app links tokio
+# too. Only the `sync` feature is needed here — the brain owns the runtime.
+tokio = { version = "1", features = ["sync"] }
+
+# --- Graphics / engine -----------------------------------------------------
+# Bevy's DEFAULT features are kept (they already include x11, glTF, PBR,
+# animation, scenes, png, tonemapping and winit — everything DefaultPlugins
+# needs), and we only ADD `wayland` so the winit backend also speaks Wayland.
+# Keeping defaults is the reliable choice: a hand-trimmed feature list is the
+# usual reason a from-scratch Bevy build fails to link.
+bevy = { version = "0.15", features = ["wayland"] }
+
+# Immediate-mode UI for the chat window that grows out of the "liquid".
+# Must match bevy's minor version (0.31 targets bevy 0.15).
+bevy_egui = "0.31"
+
+# --- Desktop overlay (Wayland layer-shell) -----------------------------------
+# winit can't create layer-shell surfaces — what lets Tomo float above every
+# window without being one (see src/overlay.rs). winit already links these, so
+# they add almost nothing to the build; `xkbcommon` turns Wayland key codes
+# into text for the chat box.
+smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop", "xkbcommon"] }
+wayland-backend = { version = "0.3", features = ["client_system"] }
+raw-window-handle = "0.6"
+
+# VRM loading (VRoid Studio export format) is OPTIONAL and off by default,
+# because bevy_vrm's version has to line up with bevy's and that alignment is
+# the thing most likely to break a fresh build. The scaffold renders a model
+# through bevy_gltf without it (see character.rs::spawn_vrm); enable the real
+# humanoid/spring-bone path with `--features vrm` once versions match.
+bevy_vrm = { version = "0.1", optional = true }
+
+# Cross-platform input synthesis (move the cursor, click, type) — the same
+# mechanism as xdotool/ydotool and accessibility tools. OPTIONAL and off by
+# default because on X11 it links libxdo (install `xdotool`) and on Wayland it
+# needs a running `ydotoold`; the app builds and runs fully without it (the
+# control paths log what they *would* do). See src/input.rs.
+enigo = { version = "0.2", optional = true }
+
+[features]
+default = []
+# Turn on real VRM loading (humanoid bones, spring-bone physics, MToon).
+vrm = ["dep:bevy_vrm"]
+# Turn on real mouse/keyboard control (otherwise control actions are logged).
+control = ["dep:enigo"]
+
+# Transparency / always-on-top / click-through are configured through winit,
+# which bevy re-exports. On Wayland, true desktop-overlay behaviour needs the
+# wlr-layer-shell protocol (see window.rs for the honest status of this).
