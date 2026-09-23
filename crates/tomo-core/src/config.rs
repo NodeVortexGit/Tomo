@@ -155,6 +155,34 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Defaults with everything under `root`, and nothing read from the
+    /// environment or a `.env`: for tests that must not touch the real setup.
+    #[cfg(test)]
+    pub(crate) fn for_tests(root: &Path) -> Self {
+        let data_dir = root.join("data");
+        std::fs::create_dir_all(&data_dir).expect("test data dir");
+        Config {
+            api_key: String::new(),
+            base_url: "https://api.anthropic.com".into(),
+            model: "claude-sonnet-5".into(),
+            effort: "low".into(),
+            edge_tts_voice: "en-US-AriaNeural".into(),
+            edge_tts_rate: "+0%".into(),
+            google_stt_api_key: String::new(),
+            stt_language: "en-US".into(),
+            persona_name: DEFAULT_PERSONA.into(),
+            character_path: data_dir.join("characters").join("default.vrm"),
+            db_path: data_dir.join("memory.sqlite3"),
+            audit_log_path: data_dir.join("command-audit.log"),
+            data_dir,
+            scripts_dir: root.join("scripts"),
+            allow_command_execution: false,
+            extra_allowed_commands: Vec::new(),
+            allow_screen: false,
+            wake_word: false,
+        }
+    }
+
     /// True when we have enough to talk to the model.
     pub fn ai_ready(&self) -> bool {
         !self.api_key.is_empty()

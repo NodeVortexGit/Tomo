@@ -14,7 +14,8 @@ tomo-core = { path = "../tomo-core" }
 
 anyhow = { workspace = true }
 tracing = { workspace = true }
-# Reads the humanoid rig and expressions out of the .vrm's glTF JSON.
+# Reads the humanoid rig, expressions and spring bones out of the .vrm's glTF
+# JSON (character.rs, animation.rs, springs.rs).
 serde_json = { workspace = true }
 # The bridge names the tokio channel types exposed by tomo_core::BrainHandle
 # (UnboundedSender / UnboundedReceiver / TryRecvError), so the app links tokio
@@ -42,13 +43,6 @@ smithay-client-toolkit = { version = "0.19", default-features = false, features 
 wayland-backend = { version = "0.3", features = ["client_system"] }
 raw-window-handle = "0.6"
 
-# VRM loading (VRoid Studio export format) is OPTIONAL and off by default,
-# because bevy_vrm's version has to line up with bevy's and that alignment is
-# the thing most likely to break a fresh build. The scaffold renders a model
-# through bevy_gltf without it (see character.rs::spawn_vrm); enable the real
-# humanoid/spring-bone path with `--features vrm` once versions match.
-bevy_vrm = { version = "0.1", optional = true }
-
 # Cross-platform input synthesis (move the cursor, click, type) — the same
 # mechanism as xdotool/ydotool and accessibility tools. OPTIONAL and off by
 # default because on X11 it links libxdo (install `xdotool`) and on Wayland it
@@ -58,8 +52,6 @@ enigo = { version = "0.2", optional = true }
 
 [features]
 default = []
-# Turn on real VRM loading (humanoid bones, spring-bone physics, MToon).
-vrm = ["dep:bevy_vrm"]
 # Turn on real mouse/keyboard control (otherwise control actions are logged).
 control = ["dep:enigo"]
 

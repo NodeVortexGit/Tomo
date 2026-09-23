@@ -25,11 +25,11 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{egui, EguiContexts};
 
-use crate::bridge::{Bridge, ChatAppendEvent, ListeningEvent, ThinkingEvent};
-use crate::character::Character;
+use crate::bridge::{Bridge, CharactersEvent, ChatAppendEvent, ListeningEvent, ThinkingEvent};
+use crate::character::{ActiveCharacter, Character};
 use crate::movement::{CharacterClicked, Locomotion};
 use crate::window::{pixel_rect, Busy, InputRegion};
-use tomo_core::events::{ChatLine, Role};
+use tomo_core::events::{CharacterChoice, ChatLine, Role};
 use tomo_core::UiToBrain;
 
 /// Where the character parks to open the chat (screen fraction from the left).
@@ -62,6 +62,8 @@ pub struct ChatState {
     listening: bool,
     /// Toggle shown in the header (brain does the actual TTS).
     voice_replies: bool,
+    /// The characters the header's menu offers.
+    characters: Vec<CharacterChoice>,
 }
 
 impl Default for ChatState {
@@ -74,6 +76,7 @@ impl Default for ChatState {
             thinking: false,
             listening: false,
             voice_replies: true,
+            characters: Vec::new(),
         }
     }
 }
@@ -112,8 +115,12 @@ fn ingest_brain_events(
     mut chat: EventReader<ChatAppendEvent>,
     mut thinking: EventReader<ThinkingEvent>,
     mut listening: EventReader<ListeningEvent>,
+    mut offered: EventReader<CharactersEvent>,
     mut loco_q: Query<&mut Locomotion, With<Character>>,
 ) {
+    for CharactersEvent(list) in offered.read() {
+        state.characters = list.clone();
+    }
     for ListeningEvent(on) in listening.read() {
         state.listening = *on;
         if let (true, Ok(mut loco)) = (*on, loco_q.get_single_mut()) {
@@ -200,6 +207,15 @@ fn drive_sequence(
 ) {
     let dt = time.delta_secs();
     busy.0 |= matches!(state.phase, Phase::Sliding | Phase::Liquid | Phase::Closing);
+    // A character swapped in while the chat is out comes over to it too.
+    if state.phase != Phase::Closed {
+        if let Ok(mut loco) = loco_q.get_single_mut() {
+            if !loco.held {
+                loco.held = true;
+                loco.walk_to(DOCK_FRACTION);
+            }
+        }
+    }
     match state.phase {
         Phase::Sliding => {
             if let Ok(loco) = loco_q.get_single() {
@@ -237,6 +253,7 @@ fn draw_chat_ui(
     mut state: ResMut<ChatState>,
     bridge: Res<Bridge>,
     characters: Query<&Character>,
+    active: Res<ActiveCharacter>,
     mut exit: EventWriter<AppExit>,
 ) {
     if matches!(state.phase, Phase::Closed) {
@@ -259,7 +276,7 @@ fn draw_chat_ui(
 
     // --- the chat window, only once (mostly) formed ---
     if matches!(state.phase, Phase::Open) || state.liquid_t > 0.85 {
-        let header = draw_window(ctx, &mut state, &bridge, t);
+        let header = draw_window(ctx, &mut state, &bridge, active.path.as_deref(), t);
         if header.close {
             state.phase = Phase::Closing;
         }
@@ -282,6 +299,60 @@ fn claim_input(
     let shown = matches!(state.phase, Phase::Liquid | Phase::Open | Phase::Closing);
     region.chat = shown.then(|| pixel_rect(panel_rect(window)));
     region.keyboard = state.phase == Phase::Open;
+}
+
+/// The header's character menu: the characters on offer (the one showing
+/// ticked), and importing a new `.vrm`.
+fn character_menu(
+    ui: &mut egui::Ui,
+    choices: &[CharacterChoice],
+    showing: Option<&std::path::Path>,
+    bridge: &Bridge,
+) {
+    for choice in choices {
+        let current = showing == Some(choice.path.as_path());
+        if ui.selectable_label(current, &choice.name).clicked() {
+            if !current {
+                bridge.send(UiToBrain::ImportCharacter {
+                    path: choice.path.clone(),
+                    name: choice.name.clone(),
+                });
+            }
+            ui.close_menu();
+        }
+    }
+    if !choices.is_empty() {
+        ui.separator();
+    }
+    if ui.button("Import a .vrm…").clicked() {
+        pick_character_file(bridge.sender());
+        ui.close_menu();
+    }
+}
+
+/// Ask for a `.vrm` with the desktop's file dialog, off the render thread,
+/// and switch to it if one is picked.
+fn pick_character_file(to_brain: tokio::sync::mpsc::UnboundedSender<UiToBrain>) {
+    std::thread::spawn(move || {
+        let title = "Choose a character (.vrm)";
+        let dialogs: [(&str, Vec<&str>); 2] = [
+            ("zenity", vec!["--file-selection", "--title", title, "--file-filter=VRM models | *.vrm *.VRM"]),
+            ("kdialog", vec!["--title", title, "--getopenfilename", ".", "*.vrm *.VRM|VRM models"]),
+        ];
+        for (program, args) in dialogs {
+            // Not installed: try the next. Cancelled: done.
+            let Ok(out) = std::process::Command::new(program).args(&args).output() else {
+                continue;
+            };
+            let path = std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+            if out.status.success() && path.is_file() {
+                let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                let _ = to_brain.send(UiToBrain::ImportCharacter { path, name });
+            }
+            return;
+        }
+        warn!("no file dialog to pick a character with (install zenity or kdialog)");
+    });
 }
 
 /// A blob of merging circles that eases from the character into a panel shape.
@@ -332,6 +403,7 @@ fn draw_window(
     ctx: &egui::Context,
     state: &mut ChatState,
     bridge: &Bridge,
+    showing: Option<&std::path::Path>,
     t: f32,
 ) -> HeaderClicks {
     use egui::{Align, Color32, Layout, RichText};
@@ -363,7 +435,13 @@ fn draw_window(
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     header.close = ui.button("×").on_hover_text("Close chat").clicked();
                     header.quit = ui.button("Quit").on_hover_text("Quit Tomo").clicked();
-                    ui.checkbox(&mut state.voice_replies, "🔊");
+                    let toggle = ui.checkbox(&mut state.voice_replies, "🔊");
+                    if toggle.on_hover_text("Speak replies aloud").changed() {
+                        bridge.send(UiToBrain::SetVoice(state.voice_replies));
+                    }
+                    ui.menu_button("👤", |ui| character_menu(ui, &state.characters, showing, bridge))
+                        .response
+                        .on_hover_text("Change character");
                 });
             });
             ui.separator();

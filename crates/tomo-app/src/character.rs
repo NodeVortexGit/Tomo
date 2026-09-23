@@ -1,11 +1,12 @@
 //! The character: loading a VRoid Studio `.vrm`, measuring it and standing it
-//! on the floor. Its motion and expressions live in animation.rs.
+//! on the floor.
 //!
-//! VRM is a humanoid glTF profile. `bevy_vrm` registers an asset loader for the
-//! `.vrm` extension and adds humanoid bones, MToon materials and spring-bone
-//! physics on top of `bevy_gltf`. All of that is deliberately hidden behind
-//! [`spawn_vrm`] — the ONE function that touches the VRM crate — so if the crate
-//! moves or you prefer another loader, this is the only place to edit.
+//! VRM is a humanoid profile of glTF: a binary glTF whose JSON adds the VRM
+//! extensions. Bevy's own glTF loader, lent the `.vrm` extension, loads the
+//! meshes, skins and textures; the VRM parts are read from the same JSON by
+//! the modules that use them — the humanoid rig and expressions by
+//! animation.rs, the spring bones by springs.rs. (MToon, VRM's toon shading,
+//! isn't implemented: the model is lit with glTF's standard materials.)
 
 use std::path::PathBuf;
 
@@ -17,8 +18,9 @@ use bevy::prelude::*;
 use bevy::render::primitives::Aabb;
 use bevy::render::renderer::RenderDevice;
 
-use crate::animation::{Animator, VrmSpec};
+use crate::animation::{gltf_json, Animator, VrmSpec};
 use crate::bridge::LoadCharacterEvent;
+use crate::springs::SpringSpec;
 
 /// Half the body's width as a share of its height (for the grab box).
 const BODY_HALF_WIDTH: f32 = 0.2;
@@ -76,10 +78,6 @@ pub struct CharacterPlugin;
 impl Plugin for CharacterPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ActiveCharacter>()
-            // bevy_vrm's plugin registers the `.vrm` loader. Kept here so the
-            // dependency stays contained to this module.
-            // .add_plugins(bevy_vrm::VrmPlugin)   // TODO(vrm): enable once the
-            //   bevy_vrm version is aligned with your bevy version (see Cargo.toml).
             .add_systems(
                 Update,
                 (on_load_character, measure_character),
@@ -104,8 +102,8 @@ impl Plugin for CharacterPlugin {
 /// A `.vrm` is a binary glTF (`.glb`) with extra VRM extensions, but bevy_gltf
 /// only claims the `gltf`/`glb` extensions, so without this nothing can load a
 /// `.vrm`. This lends the stock glTF loader the `vrm` extension: meshes, skins
-/// and textures load; the VRM-only extras (MToon, spring bones, expressions)
-/// are ignored until bevy_vrm replaces it (TODO(vrm)).
+/// and textures load, and the VRM extensions are read separately (see the
+/// module docs).
 struct VrmAsGltfLoader(GltfLoader);
 
 impl AssetLoader for VrmAsGltfLoader {
@@ -148,28 +146,13 @@ fn on_load_character(
     }
 }
 
-/// The single VRM seam. Everything VRM-specific lives here.
+/// Spawn the model at `path` (absolute, so the asset server takes it as is).
 ///
 /// Returns the root entity of the spawned character (with a [`Character`] and a
-/// [`Transform`] the movement system can drive).
+/// [`Transform`] the movement system can drive). The glTF scene is parented
+/// under it, so movement and scaling stay independent of the model's insides.
 fn spawn_vrm(commands: &mut Commands, asset_server: &AssetServer, path: &std::path::Path) -> Entity {
-    // `asset_server.load` on a `.vrm` goes through bevy_vrm's loader once its
-    // plugin is added. We load it as a Scene and parent it under our own
-    // transform so movement/scaling stays independent of the model's internals.
-    //
-    // TODO(vrm): with bevy_vrm enabled, prefer its bundle so humanoid bones and
-    // spring-bone physics are set up:
-    //     commands.spawn((
-    //         bevy_vrm::VrmBundle {
-    //             vrm: asset_server.load(path.to_path_buf()),
-    //             scene_bundle: SceneBundle { transform, ..default() },
-    //             ..default()
-    //         },
-    //         Character::default(),
-    //     ))
-    //
-    // The Scene-only path below keeps this file compiling and rendering a model
-    // even before the VRM plugin is wired, using bevy_gltf's glTF pipeline.
+    let gltf = gltf_json(path).unwrap_or_default();
     let scene: Handle<Scene> = asset_server.load(
         // glTF scenes are addressed with the `#Scene0` label.
         format!("{}#Scene0", path.to_string_lossy()),
@@ -182,8 +165,10 @@ fn spawn_vrm(commands: &mut Commands, asset_server: &AssetServer, path: &std::pa
             // all query `&Locomotion, With<Character>`; without it the
             // character would never move.
             crate::movement::Locomotion::default(),
-            // The humanoid rig and expressions, read from the file itself.
-            VrmSpec::read(path).unwrap_or_default(),
+            // The humanoid rig, expressions and spring bones, read from the
+            // file itself.
+            VrmSpec::from_gltf(&gltf).unwrap_or_default(),
+            SpringSpec::from_gltf(&gltf),
             Animator::default(),
             SceneRoot(scene),
             Transform::default(),

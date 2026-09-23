@@ -25,6 +25,8 @@ pub struct Screenshot {
     pub jpeg: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// Screen pixels per image pixel: 1 unless it had to be scaled down.
+    pub scale: f32,
 }
 
 /// Capture the whole screen.
@@ -88,6 +90,7 @@ fn fit_for_model(raw: &[u8]) -> Result<Screenshot> {
             jpeg: raw.to_vec(),
             width,
             height,
+            scale: 1.0,
         });
     }
 
@@ -102,6 +105,7 @@ fn fit_for_model(raw: &[u8]) -> Result<Screenshot> {
         jpeg,
         width: rgb.width(),
         height: rgb.height(),
+        scale: width as f32 / rgb.width() as f32,
     })
 }
 
@@ -122,6 +126,7 @@ mod tests {
     fn a_large_screenshot_is_scaled_down_to_jpeg() {
         let shot = fit_for_model(&encoded(3840, 2160, ImageFormat::Png)).unwrap();
         assert_eq!((shot.width, shot.height), (1920, 1080));
+        assert_eq!(shot.scale, 2.0);
         assert_eq!(&shot.jpeg[..2], &[0xFF, 0xD8], "JPEG magic");
     }
 
@@ -129,6 +134,7 @@ mod tests {
     fn a_small_png_is_converted_but_keeps_its_size() {
         let shot = fit_for_model(&encoded(1366, 768, ImageFormat::Png)).unwrap();
         assert_eq!((shot.width, shot.height), (1366, 768));
+        assert_eq!(shot.scale, 1.0);
         assert_eq!(&shot.jpeg[..2], &[0xFF, 0xD8]);
     }
 
@@ -137,5 +143,6 @@ mod tests {
         let jpeg = encoded(1920, 1080, ImageFormat::Jpeg);
         let shot = fit_for_model(&jpeg).unwrap();
         assert_eq!(shot.jpeg, jpeg);
+        assert_eq!(shot.scale, 1.0);
     }
 }

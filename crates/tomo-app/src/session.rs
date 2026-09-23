@@ -60,19 +60,14 @@ impl Session {
         }
     }
 
-    /// True when we're on a compositor where winit can't, on its own, place a
-    /// true always-on-top desktop overlay, so we rely on extra hints /
-    /// documented manual rules (see window.rs).
-    pub fn needs_layer_shell(&self) -> bool {
-        // On Wayland, only wlr-layer-shell gives real overlay semantics.
-        // GNOME's Mutter doesn't implement it at all; wlroots compositors
-        // (Hyprland, Sway) do.
-        self.server == DisplayServer::Wayland
-    }
-
     /// A one-line human summary for the log.
     pub fn describe(&self) -> String {
-        format!("{} on {}", self.desktop, self.server)
+        match self.desktop {
+            Desktop::Other if !self.raw_desktop.is_empty() => {
+                format!("{} ({}) on {}", self.desktop, self.raw_desktop, self.server)
+            }
+            _ => format!("{} on {}", self.desktop, self.server),
+        }
     }
 }
 

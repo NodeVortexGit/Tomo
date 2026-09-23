@@ -176,6 +176,7 @@ impl Overlay {
         let mut frame_start = Instant::now();
         // Frame-rate report for tuning (RUST_LOG=tomo::overlay=debug).
         let (mut report_start, mut frames, mut busy_frames) = (Instant::now(), 0u32, 0u32);
+        let mut updating = Duration::ZERO;
         loop {
             // While something moves, frames follow the display (vsync paces
             // the renderer). At rest, wait out the idle frame interval — but
@@ -196,6 +197,7 @@ impl Overlay {
             frame_start = Instant::now();
             self.state.forward_input(app.world_mut(), window);
             app.update();
+            updating += frame_start.elapsed();
             if let Some(exit) = app.should_exit() {
                 return exit;
             }
@@ -210,8 +212,12 @@ impl Overlay {
             let elapsed = report_start.elapsed();
             if elapsed >= Duration::from_secs(5) {
                 let fps = frames as f32 / elapsed.as_secs_f32();
-                debug!("{fps:.0} fps, {}% of frames busy", busy_frames * 100 / frames);
-                (report_start, frames, busy_frames) = (Instant::now(), 0, 0);
+                debug!(
+                    "{fps:.0} fps, {}% of frames busy, {:.1} ms a frame",
+                    busy_frames * 100 / frames,
+                    updating.as_secs_f32() * 1000.0 / frames as f32
+                );
+                (report_start, frames, busy_frames, updating) = (Instant::now(), 0, 0, Duration::ZERO);
             }
         }
     }

@@ -7,14 +7,13 @@ remembers, and which shell commands it runs for you — quietly — in the
 background.
 
 Written in **Rust** (with a little **Bash** and **Python** for device control
-and speech), split into a fully-implemented "brain" and a scaffolded "body".
+and speech), split into a "brain" (AI, memory, speech) and a "body" (the Bevy
+app that renders and moves the character).
 
-> **Honesty up front.** This repository is a *real, working brain plus a
-> structured body scaffold*, not a shrink-wrapped binary. The parts that are
-> tractable and testable are finished and unit-tested. The parts that genuinely
-> need iteration on real hardware — VRM rendering, cross-compositor transparent
-> overlays, and the fluid shader — are laid out with clean seams and honest
-> `TODO(...)` markers. See **[What's done vs. what needs work](#status)**.
+> **Where it runs.** Tomo is developed and tested on Arch Linux with Hyprland
+> (Wayland). The other desktops it knows about — KDE, Sway, GNOME, XFCE,
+> Cinnamon, i3, X11 in general — are handled in code but untested. See
+> **[What's done vs. what needs work](#status)**.
 
 ---
 
@@ -32,6 +31,9 @@ and speech), split into a fully-implemented "brain" and a scaffolded "body".
   carried, float up in a fall, knees give on landing, she leans into a start;
   plus breathing, a walk cycle, blinking, emotions, gestures and a talking
   mouth, all from the model's own VRM rig.
+- 💇 **Spring bones**: hair streams behind her when she's thrown and falls
+  the other way when she hangs upside down; skirts and ribbons sway with her
+  (the model's own `VRMC_springBone` setup, colliders included).
 - 🧠 **Claude-powered decisions** via tool use (Anthropic Messages API):
   speech, movement, emotion, memory, and command execution are all model
   choices.
@@ -40,14 +42,18 @@ and speech), split into a fully-implemented "brain" and a scaffolded "body".
 - 🗣 **"Hey Tomo"** — an always-on wake word, recognised offline (Vosk), with
   your request transcribed offline too (Whisper). No audio leaves the machine.
 - 💬 **Liquid chat window**: click Tomo → it walks to the right → a liquid blob
-  grows out of it → the blob forms the chat window.
-- 🔊 **Text-to-speech** with Edge-TTS (free neural voices).
+  grows out of it → the blob forms the chat window, with your recent
+  conversation in it.
+- 🔊 **Text-to-speech** with Edge-TTS (free neural voices) — markdown and
+  emoji are left out of the voice; the 🔊 toggle in the chat mutes it.
 - 🗃 **Long-term memory** in SQLite — preferences and facts the AI recalls and
   reuses as context.
 - 🖥 **Silent device control**: the AI runs shell commands for you; you never
   see a terminal — but every command is written to an audit log.
 - 📦 **One `install.sh`** and all secrets in a `.env` file.
-- 🎭 **Import your own characters** — drop in any `.vrm`.
+- 🎭 **Your own characters** — pick one from the chat's 👤 menu, import any
+  `.vrm` from there, or just ask Tomo to change into another one. The choice
+  sticks.
 
 ---
 
@@ -64,6 +70,8 @@ tomo/
 │   │   └── src/
 │   │       ├── config.rs     #  loads .env + XDG paths
 │   │       ├── db.rs         #  SQLite memory (prefs, memories, chat, chars)
+│   │       ├── characters.rs #  the .vrm models on offer; switching
+│   │       ├── apps.rs       #  installed apps + system toggles, from the OS
 │   │       ├── commands.rs   #  audited, deny-listed shell executor
 │   │       ├── ai.rs         #  Claude tool-use loop (Messages API)
 │   │       ├── screen.rs     #  screenshots for the model to look at
@@ -80,7 +88,9 @@ tomo/
 │           ├── character.rs  #  VRM loading + measuring
 │           ├── movement.rs   #  physics: body, limbs, drag & throw (tested)
 │           ├── animation.rs  #  poses the VRM rig from the physics; face
+│           ├── springs.rs    #  VRM spring bones: hair, skirt (tested)
 │           ├── chat.rs       #  click→walk→liquid→chat sequence (egui)
+│           ├── input.rs      #  watchable clicks/typing (feature-gated)
 │           └── bridge.rs     #  pumps brain⇄Bevy over channels
 └── scripts/
     ├── tts_edge.py           # text → mp3 (Edge neural TTS)
@@ -122,8 +132,9 @@ Then:
 
 1. Edit `.env` and add your `ANTHROPIC_API_KEY`.
 2. Put a `.vrm` at `~/.local/share/tomo/characters/default.vrm` (or set
-   `TOMO_CHARACTER`, or import one from the chat window).
-3. Launch **Tomo** from your app menu.
+   `TOMO_CHARACTER`, or import one from the chat's 👤 menu).
+3. Launch **Tomo** from your app menu. Launching it again while it runs does
+   nothing: there's only ever one Tomo.
 
 Installer options: `TOMO_SKIP_SYSDEPS=1`, `TOMO_NO_BUILD=1`, `TOMO_PREFIX=...`.
 
@@ -204,10 +215,9 @@ cargo run --release --features control     # X11: also install `xdotool`
                                            # Wayland: run `ydotoold`
 ```
 
-> On-screen *coordinate* lookup (finding exactly where an icon is) is the one
-> unfinished piece here — `find_on_screen` currently tells the model to launch
-> by command instead. The intended path is AT-SPI2 (accessibility tree) or the
-> file manager's desktop-icon positions; it's isolated so the rest works today.
+To find where to click, `find_on_screen` shows the model a screenshot (noted
+in the chat, like every look) and it reads the target's coordinates off it.
+It's only offered while screen viewing is allowed (`TOMO_ALLOW_SCREEN`).
 
 ---
 
@@ -218,14 +228,15 @@ cargo run --release --features control     # X11: also install `xdotool`
 - ✅ Config / `.env` loading
 - ✅ SQLite memory (prefs, memories, transcript, characters)
 - ✅ Claude tool-use loop over the Messages API (execute / remember / recall /
-  walk / express / animate / look at the screen), with prompt caching and
-  retries
+  walk / express / animate / change character / look at or find on the
+  screen), with prompt caching and retries
 - ✅ Screenshots for the model (grim / spectacle / gnome-screenshot / maim /
   scrot / import), scaled to 1080p-class JPEG
 - ✅ Offline "Hey Tomo": Vosk wake phrase + Whisper transcription, muted while
   Tomo speaks; the Talk button is push-to-talk through it
 - ✅ Audited, deny-listed command executor
-- ✅ Edge-TTS + Google-STT bridge (Rust side + Python helpers)
+- ✅ Edge-TTS + Google-STT bridge (Rust side + Python helpers); replies are
+  cleaned of markdown and emoji before they're spoken
 - ✅ Session detection (X11/Wayland, KDE/GNOME/XFCE/Cinnamon/Hyprland/i3/Sway)
 - ✅ Rigid-body physics: free rotation, capsule collisions with bounce and
   friction, hanging from the grab point, throws with spin, landing on its feet
@@ -234,9 +245,12 @@ cargo run --release --features control     # X11: also install `xdotool`
   landing squat, lean)
 - ✅ Procedural animation of the VRM 1.0 rig from the physics, plus blinking,
   emotions, gestures (wave / nod / shrug) and a mouth synced to the voice
+- ✅ VRM 1.0 spring bones (sphere and capsule colliders), hair in world space
+- ✅ Characters: the models on offer, switching from the chat or by asking,
+  importing a `.vrm` through the desktop's file dialog; remembered
 - ✅ Adaptive frame rate (full rate while anything moves, 24 fps at rest) and
-  a 3-thread task pool: ~26% of a core at rest, ~48% while she moves (was
-  ~67% at all times)
+  a lean scheduler: about 13% of one core at rest (was ~67% at all times)
+- ✅ One instance at a time; the chat reopens on the recent conversation
 - ✅ Layer-shell overlay (Hyprland, Sway, KDE): above all windows, click-through
   except on the character and the open chat
 - ✅ Liquid-chat state machine and egui UI
@@ -248,39 +262,27 @@ cargo run --release --features control     # X11: also install `xdotool`
 
 **Needs iteration on real hardware (marked with `TODO(...)` in code):**
 
-- 🔧 `TODO(vrm)` — enabling `bevy_vrm` and aligning its version with Bevy. The
-  loader is isolated to one function (`character.rs::spawn_vrm`) so swapping VRM
-  crates or falling back to raw glTF touches nothing else.
+- 🔧 MToon, VRM's toon shading, isn't implemented: models are lit with
+  glTF's standard materials.
 - 🔧 `TODO(input-region)` — click-through for the regular-window fallback (X11,
   GNOME Wayland): winit only offers whole-window hit-test, so this needs an X11
   XShape input region or `wl_surface.set_input_region` on winit's surface. The
   layer-shell overlay already does it. Isolated to `window.rs`.
 - 🔧 `TODO(fluid)` — the liquid is currently merging circles (reads well, no
   shader). Drop in an SDF/metaball shader for a glossier effect.
-- 🔧 `TODO(locate)` — on-screen coordinate lookup for `find_on_screen` (AT-SPI2
-  accessibility tree, or desktop-icon positions). Until then the click path
-  falls back to launching by command.
 - 🔧 VRM 0.x models load and render but aren't animated (their rig is laid out
   differently; `animation.rs` reads VRM 1.0), and face away from the viewer.
-- 🔧 `TODO(assets)` — loading a user-imported `.vrm` from an arbitrary path via
-  a registered Bevy asset source (the brain already copies imports into the
-  data dir).
+- 🔧 HiDPI (scaled outputs) is untested; screen coordinates assume scale 1.
 - ⚠️ **GNOME Wayland** ignores always-on-top and has no `wlr-layer-shell`;
   wlroots compositors (Hyprland, Sway) and all X11 setups behave correctly.
   `window.rs` logs a clear note at startup.
 
-### Build note
-
-The core is written to compile with `cargo build` and is covered by tests:
+### Tests
 
 ```bash
-cargo test -p tomo-core        # the brain
-cargo test -p tomo-app         # session + movement logic
+cargo test -p tomo-core             # the brain
+cargo test --release -p tomo-app    # physics, spring bones, session detection
 ```
-
-(The environment this was authored in had the crates.io registry blocked by
-policy, so `cargo` couldn't fetch dependencies there; run the commands above on
-your machine, where crates.io is reachable, to compile and test.)
 
 ---
 

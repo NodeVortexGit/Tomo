@@ -957,6 +957,7 @@ fn step_physics(
 fn apply_transform(
     time: Res<Time>,
     arena: Res<Arena>,
+    grab: Res<Grab>,
     mut region: ResMut<InputRegion>,
     mut q: Query<(&Locomotion, &mut Character, &mut Transform)>,
 ) {
@@ -984,7 +985,12 @@ fn apply_transform(
         }
         let rect = Rect::from_corners(lo, hi);
         character.screen_rect = Some(rect);
-        region.character = Some(pixel_rect(rect.inflate(4.0)));
+        // While she's held, the whole overlay takes the pointer: a quick drag
+        // can outrun her box for a frame, and leaving the input region would
+        // end the drag right there.
+        let held = grab.pressed_at.is_some();
+        let region_rect = if held { Rect::from_corners(Vec2::ZERO, arena.size) } else { rect.inflate(4.0) };
+        region.character = Some(pixel_rect(region_rect));
     }
 }
 

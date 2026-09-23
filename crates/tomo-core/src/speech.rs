@@ -51,7 +51,12 @@ impl Speech {
 
     /// Synthesize `text` with Edge-TTS into an mp3 for [`play`]. Separate from
     /// playback so the body can move its mouth exactly while the voice plays.
+    /// Markdown and emoji are left out of the voice (see [`speakable`]).
     pub async fn synthesize(&self, text: &str) -> Result<PathBuf> {
+        let text = speakable(text);
+        if text.is_empty() {
+            return Err(anyhow!("nothing to say out loud"));
+        }
         let out = self.cache_dir.join("last_tts.mp3");
         let script = self.scripts_dir.join("tts_edge.py");
 
@@ -66,7 +71,7 @@ impl Speech {
                 .arg("--out")
                 .arg(&out)
                 .arg("--text")
-                .arg(text)
+                .arg(&text)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
@@ -129,6 +134,92 @@ impl Speech {
         }
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
+}
+
+/// A reply as it should be *heard*. The chat shows markdown and emoji fine,
+/// but a voice saying "asterisk" or "party popper" out loud is not. Drops
+/// markdown markers and emoji, keeps a link's words but not its address, and
+/// ends every line on a pause so list items don't run together.
+pub fn speakable(text: &str) -> String {
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let line = link_words(line);
+        let line = line.trim_start().trim_start_matches(['#', '>']).trim_start();
+        let line = ["- ", "* ", "+ ", "• "]
+            .iter()
+            .find_map(|bullet| line.strip_prefix(bullet))
+            .unwrap_or(line);
+        let cleaned: String = line
+            .chars()
+            .filter_map(|c| match c {
+                '*' | '`' | '~' | '|' => None,
+                '_' => Some(' '),
+                c if is_emoji(c) => None,
+                c => Some(c),
+            })
+            .collect();
+        // Rejoin the words; punctuation that lost its word to a dropped emoji
+        // ("time ❤️!") goes back onto the word before it.
+        let mut words = String::new();
+        for word in cleaned.split_whitespace() {
+            if !words.is_empty() && !word.starts_with(['.', ',', '!', '?', ';', ':', '…', ')']) {
+                words.push(' ');
+            }
+            words.push_str(word);
+        }
+        if !words.chars().any(char::is_alphanumeric) {
+            continue; // blank, a rule like "---", or nothing but emoji
+        }
+        if words.ends_with(['.', '!', '?', '…', ':', ';', ',']) {
+            lines.push(words);
+        } else {
+            lines.push(words + ".");
+        }
+    }
+    lines.join("\n")
+}
+
+/// `[words](address)` → `words`, anywhere in the line.
+fn link_words(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(open) = rest.find('[') {
+        let inner = &rest[open + 1..];
+        let link = inner.find(']').and_then(|close| {
+            let target = inner[close + 1..].strip_prefix('(')?;
+            let end = target.find(')')?;
+            Some((&inner[..close], &target[end + 1..]))
+        });
+        match link {
+            Some((words, after)) => {
+                out.push_str(&rest[..open]);
+                out.push_str(words);
+                rest = after;
+            }
+            None => {
+                out.push_str(&rest[..=open]);
+                rest = inner;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Emoji and pictographic symbols (plus the joiners and variation selectors
+/// that glue them together), none of which a voice should read out.
+fn is_emoji(c: char) -> bool {
+    matches!(u32::from(c),
+        0x1F000..=0x1FAFF   // emoticons, pictographs, flags, …
+        | 0x2190..=0x21FF   // arrows
+        | 0x2300..=0x23FF   // ⌚ ⏰ …
+        | 0x2600..=0x27BF   // ☀ ♥ ✔ ✨ …
+        | 0x2B00..=0x2BFF   // ⭐ ⬆ …
+        | 0xFE00..=0xFE0F   // variation selectors
+        | 0x200D            // zero-width joiner
+        | 0x20E3            // keycap
+        | 0xE0000..=0xE007F // tags (subdivision flags)
+    )
 }
 
 /// Prefer the virtualenv Python that `install.sh` creates; fall back to the
@@ -228,4 +319,34 @@ async fn which(bin: &str) -> bool {
         .await
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::speakable;
+
+    #[test]
+    fn markdown_markers_are_not_read_out() {
+        assert_eq!(speakable("**Sure!** I'll `wave` now"), "Sure! I'll wave now.");
+        assert_eq!(speakable("## Plan\n> quoted"), "Plan.\nquoted.");
+        assert_eq!(speakable("a snake_case name"), "a snake case name.");
+    }
+
+    #[test]
+    fn emoji_are_dropped() {
+        assert_eq!(speakable("Hi there 👋"), "Hi there.");
+        assert_eq!(speakable("Family 👨‍👩‍👧 time ❤️!"), "Family time!");
+        assert_eq!(speakable("🎉🎉"), "");
+    }
+
+    #[test]
+    fn list_items_each_get_a_pause() {
+        assert_eq!(speakable("Here:\n- one\n* two\n\n---\n3. three"), "Here:\none.\ntwo.\n3. three.");
+    }
+
+    #[test]
+    fn links_keep_their_words_only() {
+        assert_eq!(speakable("See [the docs](https://example.com/x) now"), "See the docs now.");
+        assert_eq!(speakable("[a] and [b](c)"), "[a] and b.");
+    }
 }

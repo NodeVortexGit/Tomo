@@ -17,7 +17,7 @@ use bevy::prelude::*;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-use tomo_core::events::{BrainToUi, ChatLine};
+use tomo_core::events::{BrainToUi, CharacterChoice, ChatLine};
 use tomo_core::{BrainHandle, UiToBrain};
 
 #[derive(Resource)]
@@ -40,6 +40,11 @@ impl Bridge {
             warn!("brain channel closed: {e}");
         }
     }
+
+    /// A sender of its own, for work off the render thread (a file dialog).
+    pub fn sender(&self) -> tokio::sync::mpsc::UnboundedSender<UiToBrain> {
+        self.to_brain.clone()
+    }
 }
 
 // ---- Bevy events mirroring BrainToUi -------------------------------------
@@ -55,6 +60,10 @@ pub struct AnimateEvent(pub String);
 
 #[derive(Event, Debug, Clone)]
 pub struct LoadCharacterEvent(pub PathBuf);
+
+/// The characters on offer changed (for the chat's character menu).
+#[derive(Event, Debug, Clone)]
+pub struct CharactersEvent(pub Vec<CharacterChoice>);
 
 #[derive(Event, Debug, Clone)]
 pub struct ChatAppendEvent(pub ChatLine);
@@ -95,6 +104,7 @@ impl Plugin for BridgePlugin {
             .add_event::<EmoteEvent>()
             .add_event::<AnimateEvent>()
             .add_event::<LoadCharacterEvent>()
+            .add_event::<CharactersEvent>()
             .add_event::<ChatAppendEvent>()
             .add_event::<ThinkingEvent>()
             .add_event::<ListeningEvent>()
@@ -113,6 +123,7 @@ fn pump_from_brain(
     mut emote: EventWriter<EmoteEvent>,
     mut animate: EventWriter<AnimateEvent>,
     mut load: EventWriter<LoadCharacterEvent>,
+    mut offered: EventWriter<CharactersEvent>,
     mut chat: EventWriter<ChatAppendEvent>,
     mut thinking: EventWriter<ThinkingEvent>,
     mut listening: EventWriter<ListeningEvent>,
@@ -138,6 +149,9 @@ fn pump_from_brain(
             }
             Ok(BrainToUi::LoadCharacter(p)) => {
                 load.send(LoadCharacterEvent(p));
+            }
+            Ok(BrainToUi::Characters(list)) => {
+                offered.send(CharactersEvent(list));
             }
             Ok(BrainToUi::Chat(line)) => {
                 chat.send(ChatAppendEvent(line));

@@ -18,7 +18,6 @@
 //! a `Chat` line, then follows with the assistant's reply. That keeps the UI,
 //! the database and the model context perfectly in step.
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -26,8 +25,9 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-use crate::ai::{AiClient, ControlFlag, SharedCatalog};
+use crate::ai::{AiClient, ControlFlag, SharedCatalog, TRANSCRIPT_CONTEXT};
 use crate::apps::SystemCatalog;
+use crate::characters;
 use crate::commands::Executor;
 use crate::config::Config;
 use crate::db::Db;
@@ -103,6 +103,8 @@ async fn run_loop(
     let speech = Speech::new(&cfg);
     let python = resolve_python(&cfg.scripts_dir, &cfg.data_dir);
     let wake = wake::spawn(&cfg, python, voice_tx, ui.clone());
+    // Replies are spoken unless the chat's 🔊 toggle is off.
+    let mut voice = true;
 
     // Live OS catalog (apps + toggles) and the mouse/keyboard control switch.
     let catalog: SharedCatalog = Arc::new(RwLock::new(load_cached_catalog(&db)));
@@ -118,8 +120,8 @@ async fn run_loop(
     // Scan the OS now and then keep it fresh (boot scan + change detection).
     spawn_catalog_scanner(db.clone(), catalog.clone(), ui.clone());
 
-    // Tell the app which character to show first.
-    match startup_character(&db, &cfg) {
+    // Tell the app which character to show first, and what else it could be.
+    match characters::startup(&db, &cfg) {
         Some(path) => {
             let _ = ui.send(BrainToUi::LoadCharacter(path));
         }
@@ -128,12 +130,19 @@ async fn run_loop(
             cfg.character_path.display()
         ),
     }
+    let _ = ui.send(BrainToUi::Characters(characters::available(&db, &cfg)));
+    // Pick the conversation up where it left off: the chat shows the same
+    // recent lines the model gets as context.
+    for line in db.recent_messages(TRANSCRIPT_CONTEXT).unwrap_or_default() {
+        let _ = ui.send(BrainToUi::Chat(line));
+    }
     let _ = ui.send(BrainToUi::Status("ready".into()));
 
     while let Some(msg) = rx.recv().await {
         match msg {
             UiToBrain::UserMessage(text) => {
-                handle_user_text(&db, &ai, &speech, wake.as_ref(), &ui, text).await;
+                let speech = voice.then_some(&speech);
+                handle_user_text(&db, &ai, speech, wake.as_ref(), &ui, text).await;
             }
             UiToBrain::StartVoiceInput => {
                 // Push-to-talk through the offline listener when it runs.
@@ -150,7 +159,8 @@ async fn run_loop(
                 let _ = ui.send(BrainToUi::Status("listening…".into()));
                 match speech.listen(VOICE_SECONDS).await {
                     Ok(text) if !text.trim().is_empty() => {
-                        handle_user_text(&db, &ai, &speech, None, &ui, text).await;
+                        let speech = voice.then_some(&speech);
+                        handle_user_text(&db, &ai, speech, None, &ui, text).await;
                     }
                     Ok(_) => {
                         let _ = ui.send(BrainToUi::Status("didn't catch that".into()));
@@ -161,16 +171,17 @@ async fn run_loop(
                 }
             }
             UiToBrain::ImportCharacter { path, name } => {
-                match import_character(&db, &cfg, &path, &name) {
-                    Ok(dest) => {
-                        let _ = ui.send(BrainToUi::LoadCharacter(dest));
-                        let _ = ui.send(BrainToUi::Chat(ChatLine::new(
-                            Role::System,
-                            format!("Loaded new character “{name}”."),
-                        )));
+                match characters::activate(&db, &cfg, &path, &name) {
+                    Ok(path) => {
+                        let _ = ui.send(BrainToUi::LoadCharacter(path));
+                        let _ = ui.send(BrainToUi::Characters(characters::available(&db, &cfg)));
                     }
                     Err(e) => {
-                        let _ = ui.send(BrainToUi::Status(format!("import failed: {e}")));
+                        tracing::warn!("couldn't switch to {}: {e}", path.display());
+                        let _ = ui.send(BrainToUi::Chat(ChatLine::new(
+                            Role::System,
+                            format!("Couldn't load “{name}”: {e}"),
+                        )));
                     }
                 }
             }
@@ -182,6 +193,10 @@ async fn run_loop(
                 let _ = ui.send(BrainToUi::ControlMode(false));
                 let _ = ui.send(BrainToUi::Status("control released (panic hotkey)".into()));
                 tracing::warn!("panic stop: mouse/keyboard control disabled");
+            }
+            UiToBrain::SetVoice(on) => {
+                voice = on;
+                tracing::info!("voice replies {}", if on { "on" } else { "off" });
             }
             UiToBrain::SetControlAllowed(on) => {
                 control_allowed.store(on, Ordering::Relaxed);
@@ -199,11 +214,12 @@ async fn run_loop(
 }
 
 /// The core turn: persist + echo the user line, get a reply, persist + show +
-/// speak it. Movement/emotion happen inside `ai.respond` via the `ui` sender.
+/// speak it (unless `speech` is `None`: the voice is switched off).
+/// Movement/emotion happen inside `ai.respond` via the `ui` sender.
 async fn handle_user_text(
     db: &Db,
     ai: &AiClient,
-    speech: &Speech,
+    speech: Option<&Speech>,
     wake: Option<&Wake>,
     ui: &UnboundedSender<BrainToUi>,
     text: String,
@@ -231,7 +247,9 @@ async fn handle_user_text(
 
     // Speak in the background so the loop is free for the next message, with
     // the wake word muted so Tomo's own voice can't trigger it.
-    let speech = speech.clone();
+    let Some(speech) = speech.cloned() else {
+        return;
+    };
     let wake = wake.cloned();
     let ui = ui.clone();
     tokio::spawn(async move {
@@ -251,39 +269,6 @@ async fn handle_user_text(
             wake.mute(false);
         }
     });
-}
-
-/// The character to show at startup: the last one the user imported, else the
-/// configured `TOMO_CHARACTER` / `default.vrm`. Canonicalizing skips files that
-/// no longer exist and makes the path absolute, so Bevy doesn't resolve it
-/// against its own asset root.
-fn startup_character(db: &Db, cfg: &Config) -> Option<PathBuf> {
-    let imported = db
-        .active_character()
-        .ok()
-        .flatten()
-        .map(|c| PathBuf::from(c.path));
-    imported
-        .into_iter()
-        .chain(std::iter::once(cfg.character_path.clone()))
-        .find_map(|p| p.canonicalize().ok())
-}
-
-/// Copy an imported `.vrm` into the data dir and make it the active character.
-fn import_character(db: &Db, cfg: &Config, src: &std::path::Path, name: &str) -> Result<PathBuf> {
-    let chars_dir = cfg.data_dir.join("characters");
-    std::fs::create_dir_all(&chars_dir)?;
-    let file_name = src
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_else(|| format!("{name}.vrm"));
-    let dest = chars_dir.join(file_name);
-    if src != dest {
-        std::fs::copy(src, &dest)?;
-    }
-    db.add_character(name, &dest.to_string_lossy())?;
-    db.set_active_character(name)?;
-    Ok(dest)
 }
 
 /// Load the last catalog scan from the DB so the AI has something to work with

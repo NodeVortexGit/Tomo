@@ -40,7 +40,8 @@ pub enum UiToBrain {
     /// The mic button was pressed; brain should record + transcribe, then
     /// treat the result as a UserMessage.
     StartVoiceInput,
-    /// The user dropped a new `.vrm` onto the app.
+    /// Switch to this `.vrm` (and keep it for next time): one of the offered
+    /// [`CharacterChoice`]s, or a new file the user picked.
     ImportCharacter { path: std::path::PathBuf, name: String },
     /// The chat window opened/closed — lets the brain adjust idle behaviour.
     ChatVisibility(bool),
@@ -50,6 +51,8 @@ pub enum UiToBrain {
     /// Turn the character's ability to drive the mouse/keyboard on or off
     /// (a user setting; also flipped off by PanicStop).
     SetControlAllowed(bool),
+    /// Speak replies aloud (true), or only show them in the chat (false).
+    SetVoice(bool),
     /// Graceful shutdown.
     Shutdown,
 }
@@ -87,11 +90,19 @@ pub enum BrainToUi {
     /// Tomo's voice started (true) / stopped (false) playing — the mouth moves
     /// meanwhile.
     Speaking(bool),
-    /// Load (or swap to) the VRM model at this path — used after the user
-    /// imports a new character.
+    /// Load (or swap to) the VRM model at this path.
     LoadCharacter(std::path::PathBuf),
+    /// The characters on offer, for the chat's character menu.
+    Characters(Vec<CharacterChoice>),
     /// Transient status for logs / tray, never shown as chat.
     Status(String),
+}
+
+/// A character Tomo can appear as: a `.vrm` model and the name it goes by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharacterChoice {
+    pub name: String,
+    pub path: std::path::PathBuf,
 }
 
 impl ChatLine {

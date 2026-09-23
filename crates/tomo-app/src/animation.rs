@@ -88,25 +88,30 @@ pub struct VrmSpec {
     expressions: HashMap<String, Vec<(String, usize, f32)>>,
 }
 
-impl VrmSpec {
-    /// Read the rig description from a .vrm (binary glTF): the JSON chunk's
-    /// `VRMC_vrm` extension. `None` if the file isn't VRM 1.0.
-    pub fn read(path: &Path) -> Option<Self> {
-        let mut file = std::fs::File::open(path).ok()?;
-        let mut header = [0u8; 20];
-        file.read_exact(&mut header).ok()?;
-        if &header[0..4] != b"glTF" || &header[16..20] != b"JSON" {
-            return None;
-        }
-        let mut json = vec![0; u32::from_le_bytes(header[12..16].try_into().ok()?) as usize];
-        file.read_exact(&mut json).ok()?;
-        let gltf: Value = serde_json::from_slice(&json).ok()?;
+/// The glTF JSON of a .vrm (a binary glTF): its first chunk.
+pub fn gltf_json(path: &Path) -> Option<Value> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut header = [0u8; 20];
+    file.read_exact(&mut header).ok()?;
+    if &header[0..4] != b"glTF" || &header[16..20] != b"JSON" {
+        return None;
+    }
+    let mut json = vec![0; u32::from_le_bytes(header[12..16].try_into().ok()?) as usize];
+    file.read_exact(&mut json).ok()?;
+    serde_json::from_slice(&json).ok()
+}
 
+/// A node's name from its index in the glTF.
+pub fn node_name(gltf: &Value, index: &Value) -> Option<String> {
+    Some(gltf["nodes"].get(index.as_u64()? as usize)?["name"].as_str()?.to_string())
+}
+
+impl VrmSpec {
+    /// The rig description in a .vrm's glTF: its `VRMC_vrm` extension.
+    /// `None` if the file isn't VRM 1.0.
+    pub fn from_gltf(gltf: &Value) -> Option<Self> {
         let vrm = gltf.pointer("/extensions/VRMC_vrm")?;
-        let nodes = gltf["nodes"].as_array()?;
-        let node_name = |index: &Value| -> Option<String> {
-            Some(nodes.get(index.as_u64()? as usize)?["name"].as_str()?.to_string())
-        };
+        let node_name = |index: &Value| node_name(gltf, index);
         let bones = vrm["humanoid"]["humanBones"]
             .as_object()?
             .iter()
@@ -262,7 +267,7 @@ fn receive_cues(
                 "wave" => Some((Gesture::Wave, 0.0)),
                 "nod" => Some((Gesture::Nod, 0.0)),
                 "shrug" => Some((Gesture::Shrug, 0.0)),
-                // "jump" is physics (movement.rs); "sit" has no pose yet.
+                // "jump", "sit" and "lie_down" are physics (movement.rs).
                 "idle" => None,
                 _ => animator.gesture,
             };

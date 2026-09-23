@@ -20,13 +20,17 @@ mod input;
 mod movement;
 mod overlay;
 mod session;
+mod springs;
 mod window;
 
 use bevy::audio::AudioPlugin;
 use bevy::core::{TaskPoolOptions, TaskPoolPlugin};
+use bevy::ecs::schedule::{ExecutorKind, Schedules};
 use bevy::gilrs::GilrsPlugin;
+use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy::render::camera::ClearColorConfig;
+use bevy::render::RenderApp;
 use bevy::window::PrimaryWindow;
 use bevy::winit::WinitPlugin;
 use bevy_egui::EguiPlugin;
@@ -41,6 +45,7 @@ use crate::input::InputPlugin;
 use crate::movement::MovementPlugin;
 use crate::overlay::Overlay;
 use crate::session::{DisplayServer, Session};
+use crate::springs::SpringPlugin;
 use crate::window::{Busy, InputRegion};
 
 fn main() -> anyhow::Result<()> {
@@ -53,6 +58,16 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
 
     let config = Config::load(&root)?;
+
+    // One Tomo at a time (per memory): a second launch, say the autostart
+    // entry plus a click in the launcher, would put two on the desktop. The
+    // lock lives as long as `instance_lock`; the OS drops it on any exit.
+    let instance_lock = std::fs::File::create(config.data_dir.join("tomo.lock"));
+    if let Ok(Err(std::fs::TryLockError::WouldBlock)) = instance_lock.as_ref().map(|f| f.try_lock()) {
+        tracing::info!("Tomo is already running");
+        return Ok(());
+    }
+
     tracing::info!("{}", config.redacted());
     if !config.ai_ready() {
         tracing::warn!("no ANTHROPIC_API_KEY set — Tomo will run but can't think. Edit .env.");
@@ -66,9 +81,6 @@ fn main() -> anyhow::Result<()> {
     let brain = Brain::spawn(config)?;
     let bridge = Bridge::new(brain);
 
-    // Absolute-path VRMs imported by the user are copied into the data dir by
-    // the brain; TODO(assets) in character.rs explains registering that dir as
-    // an asset source for clean loading.
     let window_plugin = WindowPlugin {
         primary_window: Some(window::overlay_window(&session)),
         ..default()
@@ -76,14 +88,15 @@ fn main() -> anyhow::Result<()> {
     // Gamepads and Bevy's own audio go unused (speech plays through mpv);
     // leaving them out saves their threads. And one small scene doesn't need
     // a compute thread per core: waking them each frame cost more than the
-    // work they did.
+    // work they did. Logging is already set up by `init_tracing` above.
     let plugins = DefaultPlugins
         .set(window_plugin)
         .set(TaskPoolPlugin {
             task_pool_options: TaskPoolOptions::with_num_threads(3),
         })
         .disable::<GilrsPlugin>()
-        .disable::<AudioPlugin>();
+        .disable::<AudioPlugin>()
+        .disable::<LogPlugin>();
     let overlay = match session.server {
         DisplayServer::Wayland => Overlay::connect(),
         _ => None,
@@ -111,14 +124,34 @@ fn main() -> anyhow::Result<()> {
             CharacterPlugin,
             AnimationPlugin,
             MovementPlugin,
+            SpringPlugin,
             ChatPlugin,
             InputPlugin,
         ))
         .add_systems(Startup, setup_scene)
-        .add_systems(Update, forward_shutdown)
-        .run();
+        .add_systems(Update, forward_shutdown);
+    run_systems_in_line(&mut app);
+    app.run();
 
     Ok(())
+}
+
+/// Run each schedule's systems one after another on the thread running it,
+/// rather than handing them out to the task pool. One character's worth of
+/// work is far smaller than the cost of waking pool threads for it: this
+/// about halved the CPU use, at rest (≈23% → 13% of a core) and moving.
+fn run_systems_in_line(app: &mut App) {
+    fn in_line(world: &mut World) {
+        if let Some(mut schedules) = world.get_resource_mut::<Schedules>() {
+            for (_, schedule) in schedules.iter_mut() {
+                schedule.set_executor_kind(ExecutorKind::SingleThreaded);
+            }
+        }
+    }
+    in_line(app.world_mut());
+    if let Some(render) = app.get_sub_app_mut(RenderApp) {
+        in_line(render.world_mut());
+    }
 }
 
 /// Each frame starts idle; whatever moves this frame marks it busy.
