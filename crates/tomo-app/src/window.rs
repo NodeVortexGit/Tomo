@@ -22,7 +22,7 @@
 //! └───────────────────────────────────────────────────────────────────────┘
 
 use bevy::prelude::*;
-use bevy::window::{CompositeAlphaMode, PrimaryWindow, WindowLevel, WindowResolution};
+use bevy::window::{CompositeAlphaMode, WindowLevel, WindowResolution};
 
 use crate::session::{DisplayServer, Session};
 
@@ -206,8 +206,9 @@ pub mod windows {
 /// Resize the window to fill the primary monitor once winit knows its size
 /// (on Windows, [`windows::fit_to_work_area`] does it instead).
 /// Runs a few frames after startup (monitor info isn't ready at frame 0).
+#[cfg(not(windows))]
 pub fn fit_to_primary_monitor(
-    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
     monitors: Query<&bevy::window::Monitor>,
 ) {
     let Ok(mut window) = windows.get_single_mut() else {

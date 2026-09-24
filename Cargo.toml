@@ -1,26 +1,23 @@
-# Workspace root for Tomo — an AI-driven VRM desktop companion for Linux.
+# Workspace root for Tomo — a local AI VRM desktop companion for Linux and
+# Windows.
 #
 # The project is split into two crates on purpose:
 #
-#   crates/tomo-core  — the "brain": config, SQLite memory, the OpenAI
-#                       tool-calling loop, the safe command executor and the
-#                       speech bridge. It has NO graphics dependencies, so it
-#                       compiles fast and can be unit-tested on its own
-#                       (`cargo test -p tomo-core`). This is the part that is
-#                       fully implemented.
+#   crates/tomo-core  — the "brain": config, SQLite memory, the local model's
+#                       tool-use loop (Ollama / LM Studio), the safe command
+#                       executor and speech. It has NO graphics dependencies,
+#                       so it compiles fast and is unit-tested on its own
+#                       (`cargo test -p tomo-core`).
 #
 #   crates/tomo-app   — the "body": the Bevy application that loads the VRM
-#                       model, opens the transparent always-on-top overlay,
-#                       walks the character across the screen and grows the
-#                       liquid chat window. It depends on tomo-core. The
-#                       rendering / windowing / movement pieces are scaffolded
-#                       with honest TODOs — they need iteration on real
-#                       hardware (see README.md → "What is done vs. what needs
-#                       work").
+#                       model, floats it above the desktop (a Wayland overlay,
+#                       or a transparent window on Windows/X11), runs its
+#                       physics, animation, spring bones and MToon shading, and
+#                       grows the liquid chat window. It depends on tomo-core.
 #
 # Build everything:      cargo build --release
-# Build only the brain:  cargo build --release -p tomo-core
-# Check only the brain:  cargo check -p tomo-core
+# Test everything:       cargo test --workspace
+# The Windows installer: see packaging/windows/ and .github/workflows/build.yml
 
 [workspace]
 resolver = "2"

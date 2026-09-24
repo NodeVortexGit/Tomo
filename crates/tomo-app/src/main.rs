@@ -37,7 +37,6 @@ use bevy::prelude::*;
 use bevy::render::camera::ClearColorConfig;
 use bevy::render::RenderApp;
 use bevy::app::PluginGroupBuilder;
-use bevy::window::PrimaryWindow;
 use bevy_egui::EguiPlugin;
 
 use tomo_core::{Brain, Config};
@@ -237,7 +236,7 @@ fn setup_scene(mut commands: Commands) {
 #[cfg(not(windows))]
 fn fit_once(
     mut done: Local<bool>,
-    windows: Query<&mut Window, With<PrimaryWindow>>,
+    windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
     monitors: Query<&bevy::window::Monitor>,
 ) {
     if *done {
