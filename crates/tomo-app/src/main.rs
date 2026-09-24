@@ -1,9 +1,9 @@
-//! Tomo — an AI-driven VRM desktop companion for Linux.
+//! Tomo — an AI-driven VRM desktop companion for Linux and Windows.
 //!
 //! This binary is the "body". It:
-//!   • detects the desktop session (X11/Wayland, which DE),
-//!   • floats above the desktop: a layer-shell overlay where the compositor
-//!     supports it, else a transparent, always-on-top window,
+//!   • detects the desktop session (Windows; on Linux X11/Wayland, which DE),
+//!   • floats above the desktop: a layer-shell overlay where the Wayland
+//!     compositor supports it, else a transparent, always-on-top window,
 //!   • starts the `tomo-core` brain on its own thread,
 //!   • renders the VRM character and runs its physics: walking, falling,
 //!     being dragged and thrown around,
@@ -12,6 +12,9 @@
 //! All decisions (speech, movement, expression, memory, commands) come from the
 //! brain over channels; this crate only turns those into pixels and motion.
 
+// A Windows release build is a GUI app: no console window next to Tomo.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod animation;
 mod bridge;
 mod character;
@@ -19,6 +22,7 @@ mod chat;
 mod input;
 mod movement;
 mod mtoon;
+#[cfg(target_os = "linux")]
 mod overlay;
 mod session;
 mod springs;
@@ -32,8 +36,8 @@ use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy::render::camera::ClearColorConfig;
 use bevy::render::RenderApp;
+use bevy::app::PluginGroupBuilder;
 use bevy::window::PrimaryWindow;
-use bevy::winit::WinitPlugin;
 use bevy_egui::EguiPlugin;
 
 use tomo_core::{Brain, Config};
@@ -45,21 +49,33 @@ use crate::chat::ChatPlugin;
 use crate::input::InputPlugin;
 use crate::movement::MovementPlugin;
 use crate::mtoon::MToonPlugin;
-use crate::overlay::Overlay;
-use crate::session::{DisplayServer, Session};
+use crate::session::Session;
 use crate::springs::SpringPlugin;
 use crate::window::{Busy, InputRegion};
 
 fn main() -> anyhow::Result<()> {
     tomo_core::init_tracing();
 
-    // Where to find `.env` and `scripts/`. Overridable so the installed
-    // desktop entry can point at the install prefix.
+    // Where to find `.env` and `scripts/`: TOMO_ROOT (the Linux desktop
+    // entry sets it), else the current folder in development, else next to
+    // the program (the Windows install).
     let root = std::env::var("TOMO_ROOT")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
+        .unwrap_or_else(|_| default_root());
 
     let config = Config::load(&root)?;
+
+    // Which graphics API to draw with, if not the usual: `--renderer gl`, or
+    // TOMO_RENDERER in .env. (Some Windows GPU drivers only draw the
+    // transparent background right with one of them.)
+    let renderer = std::env::args()
+        .skip_while(|arg| arg != "--renderer")
+        .nth(1)
+        .or_else(|| std::env::var("TOMO_RENDERER").ok());
+    if let Some(renderer) = renderer.filter(|r| !r.trim().is_empty()) {
+        tracing::info!("drawing with {renderer}");
+        std::env::set_var("WGPU_BACKEND", renderer.trim());
+    }
 
     // One Tomo at a time (per memory): a second launch, say the autostart
     // entry plus a click in the launcher, would put two on the desktop. The
@@ -71,9 +87,6 @@ fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!("{}", config.redacted());
-    if !config.ai_ready() {
-        tracing::warn!("no ANTHROPIC_API_KEY set — Tomo will run but can't think. Edit .env.");
-    }
 
     let session = Session::detect();
     window::log_environment_notes(&session);
@@ -99,22 +112,24 @@ fn main() -> anyhow::Result<()> {
         .disable::<GilrsPlugin>()
         .disable::<AudioPlugin>()
         .disable::<LogPlugin>();
+    let mut app = App::new();
+    // On Wayland with layer-shell, not a window at all: overlay.rs drives
+    // Bevy in place of winit.
+    #[cfg(target_os = "linux")]
     let overlay = match session.server {
-        DisplayServer::Wayland => Overlay::connect(),
+        session::DisplayServer::Wayland => overlay::Overlay::connect(),
         _ => None,
     };
-    let mut app = App::new();
-    match overlay {
-        // Not a window at all: overlay.rs drives Bevy in place of winit.
-        Some(overlay) => {
-            info!("floating above all windows (layer-shell overlay)");
-            app.add_plugins(plugins.disable::<WinitPlugin>())
-                .set_runner(move |app| overlay.run(app));
-        }
-        None => {
-            app.add_plugins(plugins).add_systems(Update, fit_once);
-        }
+    #[cfg(target_os = "linux")]
+    if let Some(overlay) = overlay {
+        info!("floating above all windows (layer-shell overlay)");
+        app.add_plugins(plugins.disable::<bevy::winit::WinitPlugin>())
+            .set_runner(move |app| overlay.run(app));
+    } else {
+        in_a_window(&mut app, plugins);
     }
+    #[cfg(not(target_os = "linux"))]
+    in_a_window(&mut app, plugins);
     app.add_plugins(EguiPlugin)
         .insert_resource(ClearColor(Color::NONE)) // transparent desktop
         .insert_resource(bridge)
@@ -137,6 +152,29 @@ fn main() -> anyhow::Result<()> {
     app.run();
 
     Ok(())
+}
+
+/// Tomo in a regular window: sized to the screen, lazy at rest, and on
+/// Windows letting clicks through around the character.
+fn in_a_window(app: &mut App, plugins: PluginGroupBuilder) {
+    app.add_plugins(plugins).add_systems(Last, window::pace_frames);
+    #[cfg(windows)]
+    app.add_systems(Update, (window::windows::fit_to_work_area, window::windows::click_through));
+    #[cfg(not(windows))]
+    app.add_systems(Update, fit_once);
+}
+
+/// Where `.env` and `scripts/` are when TOMO_ROOT doesn't say: the current
+/// folder when running from the source tree, else the program's own folder.
+fn default_root() -> std::path::PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if cwd.join("scripts").is_dir() || cwd.join(".env").is_file() {
+        return cwd;
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or(cwd)
 }
 
 /// Run each schedule's systems one after another on the thread running it,
@@ -196,6 +234,7 @@ fn setup_scene(mut commands: Commands) {
 /// Regular-window mode: resize/anchor the window to the primary monitor exactly
 /// once, after winit has reported monitor geometry (not available on the first
 /// frame).
+#[cfg(not(windows))]
 fn fit_once(
     mut done: Local<bool>,
     windows: Query<&mut Window, With<PrimaryWindow>>,

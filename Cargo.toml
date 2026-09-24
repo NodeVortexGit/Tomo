@@ -37,7 +37,7 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "sync", "time", "fs", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "sync", "time", "fs", "io-util", "net"] }
 
 [profile.release]
 # The VRM/Bevy build is large; these keep the release binary lean.

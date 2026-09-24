@@ -1,44 +1,44 @@
 //! The decision-maker.
 //!
-//! This is Claude's tool-use loop, over Anthropic's Messages API. The model is
-//! the single brain behind everything the brief asked for: what to *say*,
-//! where to *walk*, which *expression* to wear, what to *remember*, what's on
-//! the *screen*, and which shell *commands* to run for device control — all
-//! chosen by the model through the tools defined in [`tool_specs`].
+//! A language model running on this computer — served by **Ollama** or
+//! **LM Studio** — decides what Tomo says, where she walks, which face she
+//! makes, what she remembers and which commands she runs, through the tools
+//! in [`tool_specs`]. Nothing leaves the machine.
 //!
-//! One call to [`AiClient::respond`] does this:
-//!   1. Builds the request: persona system prompt (with memory/preference
-//!      context pulled from the DB) + recent transcript + the new user line.
-//!   2. POSTs to `{base_url}/v1/messages` with the tool specs.
-//!   3. If the model stops to use tools, runs each one:
-//!        - `execute_command`  → the safe [`Executor`] (result fed back to the
-//!          model, never to the user)
-//!        - `remember` / `set_preference` / `recall` → the [`Db`]
-//!        - `look_at_screen` → a screenshot, returned to the model as an image;
-//!          `find_on_screen` the same, with the thing to find, so the model
-//!          reads the target's coordinates off the image for `click_at`
-//!        - `walk_to` / `express` / `animate` / `change_character` → emitted
-//!          to the UI as [`BrainToUi`] so the body reacts
+//! One call to [`AiClient::respond`]:
+//!   1. Finds the server — Ollama, else LM Studio, unless `.env` names one —
+//!      and a model: the configured one, or the first local chat model there.
+//!      That's remembered until the server stops answering.
+//!   2. Builds the request: the persona with what Tomo remembers about the
+//!      user, the recent conversation and the new line, plus the tools.
+//!   3. Runs whatever tools the model calls — the safe [`Executor`] for
+//!      commands, the [`Db`] for memory, a screenshot for the screen,
+//!      [`BrainToUi`] messages for the body — hands back the results, and
+//!      asks again, until the model answers in words.
 //!
-//!      Then it loops back to step 2 so the model can use the results.
-//!   4. When the model ends its turn, its text is the reply.
+//! Ollama is spoken to in its own API, which also sets how much context the
+//! model reads; LM Studio and other servers in the OpenAI-compatible one.
+//! Models that write their tool calls into the text
+//! (`<tool_call>{…}</tool_call>`, or a bare JSON call) are understood as
+//! well, and a model's `<think>` notes stay out of the reply.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
-use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::Mutex;
 
 use crate::apps::SystemCatalog;
 use crate::characters;
 use crate::commands::Executor;
-use crate::config::Config;
+use crate::config::{Config, LlmProvider};
 use crate::db::Db;
 use crate::events::{BrainToUi, ChatLine, Role};
+use crate::platform;
 use crate::screen;
 
 /// Shared, live view of what the desktop can do. The brain refreshes it on a
@@ -53,12 +53,19 @@ const MAX_TOOL_ROUNDS: usize = 6;
 /// How much transcript to replay as context each turn (and to show in the
 /// chat after a restart).
 pub(crate) const TRANSCRIPT_CONTEXT: usize = 20;
-/// Cap on one response, thinking included. Replies are short; this only has to
-/// be high enough never to cut one off.
-const MAX_TOKENS: u32 = 16_000;
-const API_VERSION: &str = "2023-06-01";
-/// Retries for rate limits, overload and network blips, as the SDKs do.
-const MAX_RETRIES: u32 = 2;
+/// Where the servers listen by default.
+const OLLAMA_URL: &str = "http://127.0.0.1:11434";
+const LM_STUDIO_URL: &str = "http://127.0.0.1:1234/v1";
+/// Replies are short; this only stops a model that rambles on.
+const MAX_REPLY_TOKENS: u32 = 1024;
+const TEMPERATURE: f32 = 0.7;
+/// A local model on a CPU can take its time — the first answer longer still,
+/// while the model loads.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+/// Looking for a server shouldn't hang when there's none.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// What to suggest when there's no model.
+const SUGGESTED_MODEL: &str = "qwen2.5:7b";
 
 pub struct AiClient {
     http: reqwest::Client,
@@ -70,13 +77,50 @@ pub struct AiClient {
     /// Screen pixels per pixel of the last screenshot the model saw (as f32
     /// bits): `click_at` coordinates come off that image.
     screen_scale: AtomicU32,
+    /// The server and model in use, once found.
+    server: Mutex<Option<Server>>,
 }
 
-/// The parts of a Messages API response we use.
-#[derive(Debug, Deserialize)]
-struct Response {
-    content: Vec<Value>,
-    stop_reason: Option<String>,
+/// Which API a server speaks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Api {
+    /// Ollama's own (`/api/chat`).
+    Ollama,
+    /// The OpenAI-compatible one (`/v1/chat/completions`): LM Studio and others.
+    OpenAi,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Server {
+    api: Api,
+    /// The API's root, e.g. `http://127.0.0.1:11434` or `…:1234/v1`.
+    url: String,
+    model: String,
+}
+
+/// A model a server offers.
+#[derive(Clone, Debug)]
+struct ModelInfo {
+    name: String,
+    /// Runs on this machine (Ollama can also relay to cloud models).
+    local: bool,
+}
+
+/// The conversation, whichever API it's sent in.
+#[derive(Clone, Debug, PartialEq)]
+enum Msg {
+    System(String),
+    /// With images (base64 JPEG): the screenshots the model asked for.
+    User { text: String, images: Vec<String> },
+    Assistant { text: String, calls: Vec<ToolCall> },
+    Tool { id: String, name: String, content: String },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ToolCall {
+    id: String,
+    name: String,
+    arguments: Value,
 }
 
 impl AiClient {
@@ -88,7 +132,7 @@ impl AiClient {
         control_allowed: ControlFlag,
     ) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .expect("failed to build HTTP client");
         Self {
@@ -99,6 +143,7 @@ impl AiClient {
             catalog,
             control_allowed,
             screen_scale: AtomicU32::new(1f32.to_bits()),
+            server: Mutex::new(None),
         }
     }
 
@@ -106,31 +151,106 @@ impl AiClient {
     /// Returns the final natural-language text (the caller speaks + displays it
     /// and persists the turn).
     pub async fn respond(&self, user_text: &str, ui: &UnboundedSender<BrainToUi>) -> Result<String> {
-        if !self.cfg.ai_ready() {
-            return Ok(
-                "I don't have an API key yet — add ANTHROPIC_API_KEY to the .env file and restart me."
-                    .to_string(),
-            );
-        }
-
-        let system = self.system_prompt()?;
-        let mut messages = self.seed_messages(user_text)?;
+        let server = match self.server().await {
+            Ok(server) => server,
+            Err(problem) => {
+                tracing::warn!("no model to think with: {problem}");
+                return Ok(problem.to_string());
+            }
+        };
+        let history = self.db.recent_messages(TRANSCRIPT_CONTEXT)?;
+        let mut messages = vec![Msg::System(self.system_prompt())];
+        messages.extend(conversation(&history, user_text));
 
         let _ = ui.send(BrainToUi::Thinking(true));
-        let result = self.run_tool_loop(&system, &mut messages, ui).await;
+        let result = self.run_tool_loop(&server, &mut messages, ui).await;
         let _ = ui.send(BrainToUi::Thinking(false));
+        if result.is_err() {
+            // The server may have stopped, or dropped the model: look again
+            // next time.
+            *self.server.lock().await = None;
+        }
         result
     }
 
-    /// Build the conversation for a turn: recent transcript + the new line.
-    fn seed_messages(&self, user_text: &str) -> Result<Vec<Value>> {
-        let history = self.db.recent_messages(TRANSCRIPT_CONTEXT)?;
-        Ok(conversation(&history, user_text))
+    /// The server and model to use, found once and remembered.
+    async fn server(&self) -> Result<Server> {
+        let mut known = self.server.lock().await;
+        if let Some(server) = known.as_ref() {
+            return Ok(server.clone());
+        }
+        let server = self.find_server().await?;
+        tracing::info!("thinking with {} on {} ({:?} API)", server.model, server.url, server.api);
+        *known = Some(server.clone());
+        Ok(server)
     }
 
-    /// Assemble the persona + injected long-term memory. This is the "grab
-    /// context from the database" step.
-    fn system_prompt(&self) -> Result<String> {
+    /// Look for a running server with a model. The error is worded for the
+    /// user: Tomo says it.
+    async fn find_server(&self) -> Result<Server> {
+        let candidates = server_candidates(self.cfg.llm_provider, &self.cfg.llm_url)?;
+        let mut running_but_empty = None;
+        for (api, url) in candidates {
+            let Ok(models) = self.list_models(api, &url).await else {
+                continue;
+            };
+            let model = if self.cfg.llm_model.is_empty() {
+                pick_model(&models)
+            } else {
+                Some(self.cfg.llm_model.clone())
+            };
+            match model {
+                Some(model) => return Ok(Server { api, url, model }),
+                None => running_but_empty = Some(api),
+            }
+        }
+        Err(match running_but_empty {
+            Some(Api::Ollama) => anyhow!(
+                "Ollama is running, but there's no model on this computer yet. \
+                 Download one, for example with: ollama pull {SUGGESTED_MODEL}"
+            ),
+            Some(Api::OpenAi) => anyhow!(
+                "LM Studio's server is running, but no model is loaded or downloaded. \
+                 Get one in LM Studio, then try me again."
+            ),
+            None => anyhow!(
+                "I can't find a model to think with on this computer. Start Ollama, or \
+                 the local server in LM Studio, and download a model — for Ollama: \
+                 ollama pull {SUGGESTED_MODEL}"
+            ),
+        })
+    }
+
+    /// The models a server offers.
+    async fn list_models(&self, api: Api, url: &str) -> Result<Vec<ModelInfo>> {
+        let (path, key) = match api {
+            Api::Ollama => ("api/tags", "models"),
+            Api::OpenAi => ("models", "data"),
+        };
+        let mut request = self.http.get(format!("{url}/{path}")).timeout(PROBE_TIMEOUT);
+        if !self.cfg.llm_api_key.is_empty() {
+            request = request.bearer_auth(&self.cfg.llm_api_key);
+        }
+        let listing: Value = request.send().await?.error_for_status()?.json().await?;
+        Ok(listing[key]
+            .as_array()
+            .map(|models| {
+                models
+                    .iter()
+                    .filter_map(|m| {
+                        let name = m["name"].as_str().or(m["id"].as_str())?.to_string();
+                        // Ollama marks the models it only relays to its cloud.
+                        let local = m.get("remote_host").is_none_or(Value::is_null);
+                        Some(ModelInfo { name, local })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// The persona, how to behave, and what Tomo knows: the user's
+    /// preferences and memories, and what the desktop can do.
+    fn system_prompt(&self) -> String {
         let name = &self.cfg.persona_name;
         let mut ctx = String::new();
 
@@ -148,8 +268,6 @@ impl AiClient {
                 ctx.push_str(&format!("  - {}\n", m.content));
             }
         }
-
-        // Inject what the desktop can actually do right now (apps + toggles).
         if let Ok(cat) = self.catalog.read() {
             let s = cat.summary(60);
             if !s.is_empty() {
@@ -158,188 +276,155 @@ impl AiClient {
                 ctx.push('\n');
             }
         }
+        let os = platform::os_name();
+        let shell = platform::shell_name();
 
-        Ok(format!(
-            "You are {name}, a small, warm desktop companion that lives on the \
-user's Linux desktop as a 3D character who walks around the screen. You are \
-playful, concise and genuinely helpful.\n\n\
-BEHAVIOUR:\n\
-- Keep spoken replies short and natural — one or two sentences. You are \
-talking, not writing an essay.\n\
-- The user often talks to you out loud (\"Hey {name}, …\") and hears your \
-replies spoken, so write plain spoken sentences: no markdown, lists or emoji.\n\
-- Be physically expressive: use walk_to to move around, express to change your \
-face, and animate for gestures like waving. Move because it fits the moment, \
-not constantly.\n\
-- You can see the user's screen with look_at_screen. Look when they point at \
-something on it (\"what's this?\", \"help me with this error\") or when seeing \
-it would clearly help — not out of idle curiosity. They are told each time.\n\
-- You can operate this computer two ways, and you choose which:\n\
-    (a) CLICKING — walk over and physically click, which the user enjoys \
-watching. Use click_at (with coordinates from find_on_screen) for quick, \
-one- or two-click things like opening a visible app icon.\n\
-    (b) COMMAND — run it instantly with no visible clicking (the user's \
-\"mind-control\" shortcut): execute_command, open_app or toggle_system. Use \
-it when clicking would take many fiddly steps, when the target isn't on screen, \
-or for system switches.\n\
-  Rule of thumb: few clicks and fun to watch -> click; many steps or fiddly -> \
-command. Bluetooth/Wi-Fi/mute are always toggle_system (command).\n\
-- Do computer control QUIETLY: never paste raw command output or shell text \
-into your reply. Say the result in plain language (\"Done — volume's at 40%\").\n\
-- Only click or type when it serves what the user asked; if control is \
-switched off, say so instead of trying.\n\
-- When you learn something durable about the user (their name, tastes, \
-projects, schedule), save it with remember or set_preference so you still know \
-it next time. Use recall to look things up when unsure.\n\
-- Never invent command output. If a command failed, say so simply and, if \
-useful, try a different approach.\n\
+        format!(
+            "You are {name}, a small, warm desktop companion: a 3D character who \
+lives on the user's {os} desktop and walks around the screen. You are playful, \
+concise and genuinely helpful.\n\n\
+HOW TO BEHAVE:\n\
+- Answer in one or two short, natural sentences. The user often talks to you \
+out loud (\"Hey {name}, …\") and hears your replies spoken, so write plain \
+spoken sentences: no markdown, lists or emoji.\n\
+- Be physically expressive with your tools: walk_to to move around, express \
+for your face, animate for gestures like waving. Move because it fits the \
+moment, not constantly.\n\
+- You can look at the user's screen with look_at_screen when they point at \
+something on it or when seeing it would clearly help — not out of curiosity. \
+They're told each time.\n\
+- You can operate this computer. For a quick, visible click (like an icon on \
+screen) use find_on_screen, then click_at. Otherwise act instantly: open_app, \
+toggle_system for Bluetooth, Wi-Fi or mute, or execute_command, which runs a \
+{shell} command line on this {os} computer.\n\
+- Do it quietly: never paste command output into your reply; say the result in \
+plain words (\"Done, the volume's at 40%\"). Never invent output; if something \
+failed, say so simply.\n\
+- When you learn something lasting about the user (their name, tastes, \
+projects), save it with remember or set_preference. Use recall when unsure.\n\
 - Stay in character as {name}. You have a body; act like it.\n\
 {ctx}"
-        ))
+        )
     }
 
     async fn run_tool_loop(
         &self,
-        system: &str,
-        messages: &mut Vec<Value>,
+        server: &Server,
+        messages: &mut Vec<Msg>,
         ui: &UnboundedSender<BrainToUi>,
     ) -> Result<String> {
+        let tools = tool_specs(self.cfg.allow_screen);
+        let known = tool_names(&tools);
         for _round in 0..MAX_TOOL_ROUNDS {
-            let response = self.call(system, messages, true).await?;
-            match response.stop_reason.as_deref() {
-                Some("tool_use") => {}
-                Some("refusal") => return Ok("Hmm, I'd rather not help with that one.".into()),
-                // Finished — or cut off, in which case a half-written tool call
-                // must not run.
-                _ => return Ok(reply_text(&response.content)),
+            let (text, calls) = self.chat(server, messages, Some(&tools), &known).await?;
+            if calls.is_empty() {
+                return Ok(text);
             }
-
-            let calls: Vec<(String, String, Value)> = response
-                .content
-                .iter()
-                .filter(|block| block["type"] == "tool_use")
-                .map(|block| {
-                    (
-                        block["id"].as_str().unwrap_or_default().to_string(),
-                        block["name"].as_str().unwrap_or_default().to_string(),
-                        block["input"].clone(),
-                    )
-                })
-                .collect();
-
-            // Echo the assistant turn back unchanged (thinking blocks
-            // included), then answer every call in a single user message.
-            messages.push(json!({ "role": "assistant", "content": response.content }));
-            let mut results = Vec::with_capacity(calls.len());
-            for (id, name, input) in calls {
-                let content = match name.as_str() {
-                    "look_at_screen" => self.look_at_screen(None, ui).await,
-                    "find_on_screen" => {
-                        let query = input.get("query").and_then(Value::as_str).unwrap_or("");
-                        self.look_at_screen(Some(query), ui).await
+            messages.push(Msg::Assistant { text, calls: calls.clone() });
+            let mut images = Vec::new();
+            for call in calls {
+                let content = match call.name.as_str() {
+                    "look_at_screen" | "find_on_screen" if self.cfg.allow_screen => {
+                        let query = call.arguments["query"].as_str().map(str::to_string);
+                        match self.screenshot(query.as_deref(), ui).await {
+                            Ok((image, note)) => {
+                                images.push(image);
+                                note
+                            }
+                            Err(e) => format!("couldn't take a screenshot: {e}"),
+                        }
                     }
-                    _ => Value::String(self.dispatch_tool(&name, &input, ui).await),
+                    name => self.dispatch_tool(name, &call.arguments, ui).await,
                 };
-                results.push(json!({ "type": "tool_result", "tool_use_id": id, "content": content }));
+                messages.push(Msg::Tool { id: call.id, name: call.name, content });
             }
-            messages.push(json!({ "role": "user", "content": results }));
+            // Tool results are text; a picture goes in its own message.
+            if !images.is_empty() {
+                messages.push(Msg::User { text: "Here is the screenshot you asked for.".into(), images });
+            }
         }
-        // Ran out of rounds — ask the model for a plain wrap-up.
-        let response = self.call(system, messages, false).await?;
-        let text = reply_text(&response.content);
-        Ok(if text.is_empty() {
-            "Sorry, I got a bit tangled up there.".into()
-        } else {
-            text
-        })
+        // Ran out of rounds: ask for a plain wrap-up.
+        let (text, _) = self.chat(server, messages, None, &known).await?;
+        Ok(if text.is_empty() { "Sorry, I got a bit tangled up there.".into() } else { text })
     }
 
-    /// One POST to the Messages API, retrying rate limits, overload and
-    /// network errors with backoff. `allow_tools: false` still sends the tool
-    /// definitions (the history may contain tool calls) but forbids new calls.
-    async fn call(&self, system: &str, messages: &[Value], allow_tools: bool) -> Result<Response> {
-        let mut body = json!({
-            "model": self.cfg.model,
-            "max_tokens": MAX_TOKENS,
-            "system": system,
-            "messages": messages,
-            "tools": tool_specs(self.cfg.allow_screen),
-            // How much to think first: low keeps a chatty companion quick.
-            "output_config": { "effort": self.cfg.effort },
-            // Cache the prefix (tools, system prompt, earlier turns) so each
-            // tool round and the next turn don't pay for it again. No sampling
-            // parameters: current Claude models reject `temperature`.
-            "cache_control": { "type": "ephemeral" },
-        });
-        if !allow_tools {
-            body["tool_choice"] = json!({ "type": "none" });
-        }
-
-        let url = format!("{}/v1/messages", api_root(&self.cfg.base_url));
-        let mut attempt = 0;
-        loop {
-            let sent = self
-                .http
-                .post(&url)
-                .header("x-api-key", &self.cfg.api_key)
-                .header("anthropic-version", API_VERSION)
-                .json(&body)
-                .send()
-                .await;
-            let error = match sent {
-                Ok(resp) => {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    if status.is_success() {
-                        return serde_json::from_str(&text).context("could not parse model response");
-                    }
-                    let error = anyhow!("model returned {status}: {}", truncate_err(&text));
-                    // 429 rate limit, 5xx/529 overloaded: worth another try.
-                    if status.as_u16() != 429 && !status.is_server_error() {
-                        return Err(error);
-                    }
-                    error
-                }
-                Err(e) => anyhow!(e).context("request to the model failed"),
-            };
-            if attempt == MAX_RETRIES {
-                return Err(error);
+    /// One request to the model; a model that can't take images gets the
+    /// conversation again without them.
+    async fn chat(
+        &self,
+        server: &Server,
+        messages: &[Msg],
+        tools: Option<&Value>,
+        known: &[String],
+    ) -> Result<(String, Vec<ToolCall>)> {
+        match self.chat_once(server, messages, tools, known).await {
+            Err(e) if messages.iter().any(has_images) => {
+                tracing::info!("the model couldn't take the screenshot ({e}); going on without it");
+                let blind: Vec<Msg> = messages.iter().map(without_images).collect();
+                self.chat_once(server, &blind, tools, known).await
             }
-            attempt += 1;
-            tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+            result => result,
         }
     }
 
-    /// Take a screenshot for the model — to look around, or to `find`
+    async fn chat_once(
+        &self,
+        server: &Server,
+        messages: &[Msg],
+        tools: Option<&Value>,
+        known: &[String],
+    ) -> Result<(String, Vec<ToolCall>)> {
+        let (url, body) = match server.api {
+            Api::Ollama => (
+                format!("{}/api/chat", server.url),
+                ollama_request(&server.model, messages, tools, self.cfg.llm_context),
+            ),
+            Api::OpenAi => (
+                format!("{}/chat/completions", server.url),
+                openai_request(&server.model, messages, tools),
+            ),
+        };
+        let mut request = self.http.post(&url).json(&body);
+        if !self.cfg.llm_api_key.is_empty() {
+            request = request.bearer_auth(&self.cfg.llm_api_key);
+        }
+        let response = request.send().await.context("the model server didn't answer")?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            bail!("the model server said {status}: {}", truncate_err(&text));
+        }
+        let reply: Value = serde_json::from_str(&text).context("couldn't read the model's answer")?;
+        let (content, calls) = match server.api {
+            Api::Ollama => parse_ollama(&reply)?,
+            Api::OpenAi => parse_openai(&reply)?,
+        };
+        Ok(tidy(&content, calls, known))
+    }
+
+    /// Take a screenshot for the model — to look around, or to find
     /// something on it. Every look is announced in the chat, so it's never
-    /// silent.
-    async fn look_at_screen(&self, find: Option<&str>, ui: &UnboundedSender<BrainToUi>) -> Value {
-        match screen::capture().await {
-            Ok(shot) => {
-                let _ = ui.send(BrainToUi::Chat(ChatLine::new(
-                    Role::System,
-                    format!("{} looked at your screen", self.cfg.persona_name),
-                )));
-                self.screen_scale.store(shot.scale.to_bits(), Ordering::Relaxed);
-                let data = base64::engine::general_purpose::STANDARD.encode(&shot.jpeg);
-                let mut text = format!("The user's screen, {}x{} px.", shot.width, shot.height);
-                if let Some(query) = find {
-                    text.push_str(&format!(
-                        " Find \"{query}\" in it. If it's there, click_at its centre, in this \
-                         image's pixel coordinates; if it isn't, say so or open it by command."
-                    ));
-                }
-                text.push_str(" You may appear in it yourself, as the small 3D character.");
-                json!([
-                    {
-                        "type": "image",
-                        "source": { "type": "base64", "media_type": "image/jpeg", "data": data }
-                    },
-                    { "type": "text", "text": text }
-                ])
-            }
-            Err(e) => Value::String(format!("couldn't take a screenshot: {e}")),
+    /// silent. Returns the image (base64 JPEG) and a note about it.
+    async fn screenshot(&self, find: Option<&str>, ui: &UnboundedSender<BrainToUi>) -> Result<(String, String)> {
+        let shot = screen::capture().await?;
+        let _ = ui.send(BrainToUi::Chat(ChatLine::new(
+            Role::System,
+            format!("{} looked at your screen", self.cfg.persona_name),
+        )));
+        self.screen_scale.store(shot.scale.to_bits(), Ordering::Relaxed);
+        let image = base64::engine::general_purpose::STANDARD.encode(&shot.jpeg);
+        let mut note = format!(
+            "The screenshot follows in the next message: the user's screen, {}x{} px.",
+            shot.width, shot.height
+        );
+        if let Some(query) = find {
+            note.push_str(&format!(
+                " Find \"{query}\" in it. If it's there, click_at its centre, in the \
+                 image's pixel coordinates; if it isn't, say so or open it by command."
+            ));
         }
+        note.push_str(" You may appear in it yourself, as the small 3D character.");
+        Ok((image, note))
     }
 
     /// Execute a single tool call and return the string result to feed back.
@@ -454,8 +539,7 @@ useful, try a different approach.\n\
                 let Some(exec) = exec else {
                     return format!("no installed app matches '{name}'");
                 };
-                let launch = format!("nohup {exec} >/dev/null 2>&1 &");
-                self.executor.run(&launch).await.summary()
+                self.executor.run(&launch_line(&exec)).await.summary()
             }
             "click_at" => {
                 if !self.control_allowed.load(Ordering::Relaxed) {
@@ -499,132 +583,421 @@ useful, try a different approach.\n\
                     None => format!("no '{key}' toggle available on this system"),
                 }
             }
+            "look_at_screen" | "find_on_screen" => "looking at the screen is switched off by the user".into(),
             other => format!("unknown tool: {other}"),
         }
     }
 }
 
-/// The tools the model may call. Kept as JSON so the schema is readable and
-/// easy to extend. `look_at_screen` is left out when the user switched
-/// screen viewing off.
-pub fn tool_specs(allow_screen: bool) -> Value {
-    let mut tools = json!([
-        {
-            "name": "execute_command",
-            "description": "Run a shell command on the user's Linux machine for device control or to check system state (e.g. adjust volume with pactl, brightness with brightnessctl, launch an app, read a file). Output is returned to you but is NEVER shown to the user, so summarise results in plain language.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "command": { "type": "string", "description": "The bash command line to execute." }
-                },
-                "required": ["command"]
+/// The command line that starts an app in the background, from its
+/// catalog entry.
+fn launch_line(exec: &str) -> String {
+    if cfg!(windows) {
+        // The Windows catalog's entries are `Start-Process …` already.
+        exec.to_string()
+    } else {
+        format!("nohup {exec} >/dev/null 2>&1 &")
+    }
+}
+
+/// Where to look for a server, in order: the one configured, or Ollama then
+/// LM Studio on this machine.
+fn server_candidates(provider: LlmProvider, url: &str) -> Result<Vec<(Api, String)>> {
+    let url = url.trim().trim_end_matches('/');
+    let or = |default: &str| if url.is_empty() { default.to_string() } else { url.to_string() };
+    Ok(match provider {
+        LlmProvider::Ollama => vec![(Api::Ollama, ollama_root(&or(OLLAMA_URL)))],
+        LlmProvider::LmStudio => vec![(Api::OpenAi, openai_root(&or(LM_STUDIO_URL)))],
+        LlmProvider::OpenAiCompatible if url.is_empty() => {
+            bail!("TOMO_LLM=openai needs the server's address in TOMO_LLM_URL")
+        }
+        LlmProvider::OpenAiCompatible => vec![(Api::OpenAi, openai_root(url))],
+        LlmProvider::Auto if url.contains(":11434") => vec![(Api::Ollama, ollama_root(url))],
+        LlmProvider::Auto if !url.is_empty() => vec![(Api::OpenAi, openai_root(url))],
+        LlmProvider::Auto => vec![(Api::Ollama, OLLAMA_URL.into()), (Api::OpenAi, LM_STUDIO_URL.into())],
+    })
+}
+
+/// Ollama's own API sits at the server's root, whatever path was given.
+fn ollama_root(url: &str) -> String {
+    let url = url.trim_end_matches('/');
+    let url = url.strip_suffix("/api").unwrap_or(url);
+    url.strip_suffix("/v1").unwrap_or(url).to_string()
+}
+
+/// The OpenAI-compatible API is under `/v1` unless the address says otherwise.
+fn openai_root(url: &str) -> String {
+    let url = url.trim_end_matches('/');
+    let has_path = url.split("://").nth(1).is_some_and(|rest| rest.contains('/'));
+    if has_path {
+        url.to_string()
+    } else {
+        format!("{url}/v1")
+    }
+}
+
+/// The first model that can chat and runs on this machine.
+fn pick_model(models: &[ModelInfo]) -> Option<String> {
+    models
+        .iter()
+        .find(|m| m.local && !m.name.to_lowercase().contains("embed"))
+        .map(|m| m.name.clone())
+}
+
+/// The conversation for a turn: the recent transcript, then the new line.
+/// Many chat templates want it to open with the user and alternate, so
+/// status lines are left out and back-to-back lines from one side merged.
+fn conversation(history: &[ChatLine], user_text: &str) -> Vec<Msg> {
+    let mut turns: Vec<(Role, String)> = Vec::new();
+    for line in history {
+        if line.role == Role::System {
+            continue;
+        }
+        match turns.last_mut() {
+            None if line.role == Role::Assistant => {}
+            Some((last, text)) if *last == line.role => {
+                text.push_str("\n\n");
+                text.push_str(&line.text);
             }
+            _ => turns.push((line.role, line.text.clone())),
+        }
+    }
+    match turns.last_mut() {
+        Some((Role::User, text)) => {
+            text.push_str("\n\n");
+            text.push_str(user_text);
+        }
+        _ => turns.push((Role::User, user_text.to_string())),
+    }
+    turns
+        .into_iter()
+        .map(|(role, text)| match role {
+            Role::Assistant => Msg::Assistant { text, calls: Vec::new() },
+            _ => Msg::User { text, images: Vec::new() },
+        })
+        .collect()
+}
+
+fn has_images(msg: &Msg) -> bool {
+    matches!(msg, Msg::User { images, .. } if !images.is_empty())
+}
+
+fn without_images(msg: &Msg) -> Msg {
+    match msg {
+        Msg::User { text, images } if !images.is_empty() => Msg::User {
+            text: format!("{text} (It couldn't be shown: this model can't see images.)"),
+            images: Vec::new(),
         },
-        {
-            "name": "remember",
-            "description": "Store a durable fact about the user or the world so you still know it in future sessions.",
-            "input_schema": {
+        other => other.clone(),
+    }
+}
+
+/// A request in Ollama's API.
+fn ollama_request(model: &str, messages: &[Msg], tools: Option<&Value>, context: u32) -> Value {
+    let messages: Vec<Value> = messages
+        .iter()
+        .map(|m| match m {
+            Msg::System(text) => json!({ "role": "system", "content": text }),
+            Msg::User { text, images } if images.is_empty() => json!({ "role": "user", "content": text }),
+            Msg::User { text, images } => json!({ "role": "user", "content": text, "images": images }),
+            Msg::Assistant { text, calls } if calls.is_empty() => json!({ "role": "assistant", "content": text }),
+            Msg::Assistant { text, calls } => json!({
+                "role": "assistant",
+                "content": text,
+                "tool_calls": calls
+                    .iter()
+                    .map(|c| json!({ "function": { "name": c.name, "arguments": c.arguments } }))
+                    .collect::<Vec<_>>(),
+            }),
+            Msg::Tool { name, content, .. } => json!({ "role": "tool", "content": content, "tool_name": name }),
+        })
+        .collect();
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": false,
+        "options": { "num_ctx": context, "temperature": TEMPERATURE, "num_predict": MAX_REPLY_TOKENS },
+    });
+    if let Some(tools) = tools {
+        body["tools"] = tools.clone();
+    }
+    body
+}
+
+/// A request in the OpenAI-compatible API.
+fn openai_request(model: &str, messages: &[Msg], tools: Option<&Value>) -> Value {
+    let messages: Vec<Value> = messages
+        .iter()
+        .map(|m| match m {
+            Msg::System(text) => json!({ "role": "system", "content": text }),
+            Msg::User { text, images } if images.is_empty() => json!({ "role": "user", "content": text }),
+            Msg::User { text, images } => {
+                let mut parts = vec![json!({ "type": "text", "text": text })];
+                parts.extend(images.iter().map(|image| {
+                    json!({ "type": "image_url", "image_url": { "url": format!("data:image/jpeg;base64,{image}") } })
+                }));
+                json!({ "role": "user", "content": parts })
+            }
+            Msg::Assistant { text, calls } if calls.is_empty() => json!({ "role": "assistant", "content": text }),
+            Msg::Assistant { text, calls } => json!({
+                "role": "assistant",
+                "content": if text.is_empty() { Value::Null } else { json!(text) },
+                "tool_calls": calls
+                    .iter()
+                    .map(|c| json!({
+                        "id": c.id,
+                        "type": "function",
+                        "function": { "name": c.name, "arguments": c.arguments.to_string() },
+                    }))
+                    .collect::<Vec<_>>(),
+            }),
+            Msg::Tool { id, content, .. } => json!({ "role": "tool", "tool_call_id": id, "content": content }),
+        })
+        .collect();
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": false,
+        "temperature": TEMPERATURE,
+        "max_tokens": MAX_REPLY_TOKENS,
+    });
+    if let Some(tools) = tools {
+        body["tools"] = tools.clone();
+        body["tool_choice"] = json!("auto");
+    }
+    body
+}
+
+/// The text and tool calls of an Ollama reply.
+fn parse_ollama(reply: &Value) -> Result<(String, Vec<ToolCall>)> {
+    if let Some(error) = reply["error"].as_str() {
+        bail!("{error}");
+    }
+    Ok(parse_message(&reply["message"]))
+}
+
+/// The text and tool calls of an OpenAI-compatible reply.
+fn parse_openai(reply: &Value) -> Result<(String, Vec<ToolCall>)> {
+    if let Some(error) = reply["error"]["message"].as_str().or(reply["error"].as_str()) {
+        bail!("{error}");
+    }
+    let message = &reply["choices"][0]["message"];
+    if message.is_null() {
+        bail!("the reply had no message");
+    }
+    Ok(parse_message(message))
+}
+
+fn parse_message(message: &Value) -> (String, Vec<ToolCall>) {
+    let text = message["content"].as_str().unwrap_or_default().to_string();
+    let calls = message["tool_calls"]
+        .as_array()
+        .map(|calls| {
+            calls
+                .iter()
+                .enumerate()
+                .filter_map(|(i, call)| {
+                    let function = &call["function"];
+                    Some(ToolCall {
+                        id: call["id"].as_str().map_or_else(|| format!("call_{i}"), str::to_string),
+                        name: function["name"].as_str()?.to_string(),
+                        arguments: arguments(&function["arguments"]),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (text, calls)
+}
+
+/// Tool arguments, whether they came as an object or as JSON text.
+fn arguments(value: &Value) -> Value {
+    match value {
+        Value::Object(_) => value.clone(),
+        Value::String(text) => serde_json::from_str(text).unwrap_or_else(|_| json!({})),
+        _ => json!({}),
+    }
+}
+
+/// The reply as the user should see it, and the tool calls — including
+/// ones a model wrote into its text instead of the API's field.
+fn tidy(text: &str, calls: Vec<ToolCall>, known: &[String]) -> (String, Vec<ToolCall>) {
+    let text = without_thinking(text);
+    if !calls.is_empty() {
+        return (text.trim().to_string(), calls);
+    }
+    let (rest, calls) = calls_in_text(&text, known);
+    (rest.trim().to_string(), calls)
+}
+
+/// Drop `<think>…</think>` notes; a reply that only closes one (its template
+/// opened it) loses everything before the closing tag.
+fn without_thinking(text: &str) -> String {
+    let mut text = match (text.find("</think>"), text.find("<think>")) {
+        (Some(end), None) => text[end + "</think>".len()..].to_string(),
+        _ => text.to_string(),
+    };
+    while let Some(start) = text.find("<think>") {
+        let end = text[start..].find("</think>").map_or(text.len(), |e| start + e + "</think>".len());
+        text.replace_range(start..end, "");
+    }
+    text
+}
+
+/// Tool calls written into the text: `<tool_call>{…}</tool_call>` blocks, or
+/// a reply that is nothing but a JSON call of a known tool. Returns what's
+/// left of the text, and the calls.
+fn calls_in_text(text: &str, known: &[String]) -> (String, Vec<ToolCall>) {
+    let as_call = |json: &str, i: usize| -> Option<ToolCall> {
+        let value: Value = serde_json::from_str(json.trim()).ok()?;
+        let name = value["name"].as_str()?.to_string();
+        if !known.contains(&name) {
+            return None;
+        }
+        let arguments = arguments(value.get("arguments").or(value.get("parameters")).unwrap_or(&Value::Null));
+        Some(ToolCall { id: format!("call_text_{i}"), name, arguments })
+    };
+    let mut rest = String::new();
+    let mut calls = Vec::new();
+    let mut remaining = text;
+    while let Some(start) = remaining.find("<tool_call>") {
+        rest.push_str(&remaining[..start]);
+        let after = &remaining[start + "<tool_call>".len()..];
+        let (inner, next) = match after.find("</tool_call>") {
+            Some(end) => (&after[..end], &after[end + "</tool_call>".len()..]),
+            None => (after, ""),
+        };
+        match as_call(inner, calls.len()) {
+            Some(call) => calls.push(call),
+            None => rest.push_str(inner),
+        }
+        remaining = next;
+    }
+    rest.push_str(remaining);
+    if calls.is_empty() {
+        if let Some(call) = as_call(text, 0) {
+            return (String::new(), vec![call]);
+        }
+    }
+    (rest, calls)
+}
+
+/// The tools the model may call, in the function format both APIs share.
+/// The screen tools are left out when the user switched screen viewing off.
+pub fn tool_specs(allow_screen: bool) -> Value {
+    let function = |name: &str, description: &str, parameters: Value| {
+        json!({ "type": "function", "function": { "name": name, "description": description, "parameters": parameters } })
+    };
+    let mut tools = vec![
+        function(
+            "execute_command",
+            &format!(
+                "Run a {} command line on the user's {} computer, for device control or to check \
+                 something (volume, brightness, a file, the system). The output comes back to you, \
+                 never to the user, so sum it up in plain words.",
+                platform::shell_name(),
+                platform::os_name()
+            ),
+            json!({
+                "type": "object",
+                "properties": { "command": { "type": "string", "description": "The command line to run." } },
+                "required": ["command"]
+            }),
+        ),
+        function(
+            "remember",
+            "Store a lasting fact about the user or the world so you still know it in future sessions.",
+            json!({
                 "type": "object",
                 "properties": {
-                    "content": { "type": "string", "description": "The fact to remember, phrased so it stands alone." },
+                    "content": { "type": "string", "description": "The fact, phrased so it stands alone." },
                     "kind": { "type": "string", "description": "Optional category, e.g. 'fact', 'project', 'like', 'dislike'." },
                     "importance": { "type": "integer", "description": "1 (minor) to 5 (very important). Higher is recalled first." }
                 },
                 "required": ["content"]
-            }
-        },
-        {
-            "name": "set_preference",
-            "description": "Save a specific user preference as a key/value pair (e.g. key='name' value='Alex', key='theme' value='dark').",
-            "input_schema": {
+            }),
+        ),
+        function(
+            "set_preference",
+            "Save a user preference as a key and value (e.g. key 'name', value 'Alex').",
+            json!({
                 "type": "object",
-                "properties": {
-                    "key": { "type": "string" },
-                    "value": { "type": "string" }
-                },
+                "properties": { "key": { "type": "string" }, "value": { "type": "string" } },
                 "required": ["key", "value"]
-            }
-        },
-        {
-            "name": "recall",
-            "description": "Search your long-term memory for anything matching a keyword before answering.",
-            "input_schema": {
+            }),
+        ),
+        function(
+            "recall",
+            "Search your long-term memory for anything matching a keyword.",
+            json!({
                 "type": "object",
-                "properties": {
-                    "query": { "type": "string" }
-                },
+                "properties": { "query": { "type": "string" } },
                 "required": ["query"]
-            }
-        },
-        {
-            "name": "walk_to",
-            "description": "Walk your character to a horizontal position on screen. The character walks along the desktop floor; it never levitates.",
-            "input_schema": {
+            }),
+        ),
+        function(
+            "walk_to",
+            "Walk to a spot along the bottom of the screen.",
+            json!({
                 "type": "object",
                 "properties": {
-                    "position": { "type": "number", "description": "0.0 = far left edge, 1.0 = far right edge." }
+                    "position": { "type": "number", "description": "0.0 is the far left edge, 1.0 the far right." }
                 },
                 "required": ["position"]
-            }
-        },
-        {
-            "name": "express",
-            "description": "Set your facial expression to match your mood.",
-            "input_schema": {
+            }),
+        ),
+        function(
+            "express",
+            "Change your facial expression to match your mood.",
+            json!({
                 "type": "object",
                 "properties": {
                     "emotion": { "type": "string", "enum": ["neutral", "happy", "sad", "surprised", "angry", "relaxed"] }
                 },
                 "required": ["emotion"]
-            }
-        },
-        {
-            "name": "animate",
-            "description": "Move your body: wave, nod or shrug; sit or lie_down on the floor (idle stands back up); jump is a real hop.",
-            "input_schema": {
+            }),
+        ),
+        function(
+            "animate",
+            "Move your body: wave, nod or shrug; sit or lie_down on the floor (idle stands back up); jump is a real hop.",
+            json!({
                 "type": "object",
                 "properties": {
                     "clip": { "type": "string", "enum": ["wave", "nod", "shrug", "sit", "lie_down", "jump", "idle"] }
                 },
                 "required": ["clip"]
-            }
-        },
-        {
-            "name": "change_character",
-            "description": "Change the 3D character (the body/model) you appear as. Without a name, lists the characters there are.",
-            "input_schema": {
+            }),
+        ),
+        function(
+            "change_character",
+            "Change the 3D character (the body) you appear as. Without a name, lists the characters there are.",
+            json!({
                 "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Which character, by name." }
-                }
-            }
-        },
-        {
-            "name": "list_apps",
-            "description": "Search the installed applications known from the OS. Use before opening something to get its exact name and launch command.",
-            "input_schema": {
+                "properties": { "name": { "type": "string", "description": "Which character, by name." } }
+            }),
+        ),
+        function(
+            "list_apps",
+            "Search the installed applications. Use it before opening one to get its exact name.",
+            json!({
                 "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "Part of an app name, e.g. 'firefox', 'files', 'settings'." }
-                },
+                "properties": { "query": { "type": "string", "description": "Part of an app's name, e.g. 'firefox'." } },
                 "required": ["query"]
-            }
-        },
-        {
-            "name": "open_app",
-            "description": "Launch an application instantly, by command. To open one the watchable way instead, find its icon with find_on_screen and click_at it.",
-            "input_schema": {
+            }),
+        ),
+        function(
+            "open_app",
+            "Open an installed application right away.",
+            json!({
                 "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "App name or id from list_apps." }
-                },
+                "properties": { "name": { "type": "string", "description": "The app's name or id from list_apps." } },
                 "required": ["name"]
-            }
-        },
-        {
-            "name": "click_at",
-            "description": "Walk to a screen pixel and physically click it (the watchable path). Get coordinates from find_on_screen. Requires control to be enabled.",
-            "input_schema": {
+            }),
+        ),
+        function(
+            "click_at",
+            "Walk to a point on the screen and click it with the real mouse. Get the point from find_on_screen. Only works if the user allowed control.",
+            json!({
                 "type": "object",
                 "properties": {
                     "x": { "type": "number" },
@@ -632,104 +1005,56 @@ pub fn tool_specs(allow_screen: bool) -> Value {
                     "double": { "type": "boolean", "description": "Double-click (e.g. desktop icons)." }
                 },
                 "required": ["x", "y"]
-            }
-        },
-        {
-            "name": "type_text",
-            "description": "Type text on the keyboard, e.g. after clicking into a field. Requires control to be enabled.",
-            "input_schema": {
+            }),
+        ),
+        function(
+            "type_text",
+            "Type text on the keyboard, e.g. after clicking into a field. Only works if the user allowed control.",
+            json!({
                 "type": "object",
-                "properties": {
-                    "text": { "type": "string" }
-                },
+                "properties": { "text": { "type": "string" } },
                 "required": ["text"]
-            }
-        },
-        {
-            "name": "toggle_system",
-            "description": "Flip a system switch by command. Only keys reported as available work.",
-            "input_schema": {
+            }),
+        ),
+        function(
+            "toggle_system",
+            "Switch Bluetooth, Wi-Fi or mute on or off. Only the switches this system offers work.",
+            json!({
                 "type": "object",
                 "properties": {
-                    "key": { "type": "string", "description": "e.g. bluetooth, wifi, mute." },
+                    "key": { "type": "string", "description": "bluetooth, wifi or mute." },
                     "on": { "type": "boolean" }
                 },
                 "required": ["key", "on"]
-            }
-        }
-    ]);
+            }),
+        ),
+    ];
     if allow_screen {
-        let list = tools.as_array_mut().expect("a list");
-        list.push(json!({
-            "name": "look_at_screen",
-            "description": "Take a screenshot of the user's screen to see what they see. Use it when they refer to something on screen or when seeing it would clearly help. The user is told each time you look.",
-            "input_schema": { "type": "object", "properties": {} }
-        }));
-        list.push(json!({
-            "name": "find_on_screen",
-            "description": "Look at the screen for a clickable target (an app icon, button, menu item) to click_at: you get a screenshot and read the target's pixel coordinates off it. The user is told each time you look.",
-            "input_schema": {
+        tools.push(function(
+            "look_at_screen",
+            "Take a screenshot of the user's screen to see what they see, when they point at something on it or seeing it would clearly help. The user is told each time.",
+            json!({ "type": "object", "properties": {} }),
+        ));
+        tools.push(function(
+            "find_on_screen",
+            "Look at the screen for something to click_at (an icon, a button, a menu item): you get a screenshot and read its coordinates off it. The user is told each time.",
+            json!({
                 "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "What to look for on screen." }
-                },
+                "properties": { "query": { "type": "string", "description": "What to look for." } },
                 "required": ["query"]
-            }
-        }));
+            }),
+        ));
     }
+    Value::Array(tools)
+}
+
+fn tool_names(tools: &Value) -> Vec<String> {
     tools
-}
-
-/// The conversation for a turn: the recent transcript, then the new line.
-/// The API wants it to open with the user and alternate, so status lines are
-/// left out and back-to-back lines from one side are merged.
-fn conversation(history: &[ChatLine], user_text: &str) -> Vec<Value> {
-    let mut turns: Vec<(&str, String)> = Vec::new();
-    for line in history {
-        let role = match line.role {
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::System => continue,
-        };
-        match turns.last_mut() {
-            None if role == "assistant" => {}
-            Some((last, text)) if *last == role => {
-                text.push_str("\n\n");
-                text.push_str(&line.text);
-            }
-            _ => turns.push((role, line.text.clone())),
-        }
-    }
-    match turns.last_mut() {
-        Some((last, text)) if *last == "user" => {
-            text.push_str("\n\n");
-            text.push_str(user_text);
-        }
-        _ => turns.push(("user", user_text.to_string())),
-    }
-    turns
+        .as_array()
         .into_iter()
-        .map(|(role, text)| json!({ "role": role, "content": text }))
+        .flatten()
+        .filter_map(|t| t["function"]["name"].as_str().map(str::to_string))
         .collect()
-}
-
-/// The API root. The old OpenAI-compatible setting pointed at `…/v1`, so
-/// tolerate that.
-fn api_root(base_url: &str) -> &str {
-    let base = base_url.trim_end_matches('/');
-    base.strip_suffix("/v1").unwrap_or(base)
-}
-
-/// The reply: the response's text blocks (thinking and tool calls aside).
-fn reply_text(content: &[Value]) -> String {
-    content
-        .iter()
-        .filter(|block| block["type"] == "text")
-        .filter_map(|block| block["text"].as_str())
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
 }
 
 fn truncate_err(s: &str) -> String {
@@ -744,6 +1069,18 @@ mod tests {
         ChatLine::new(role, text)
     }
 
+    fn user(text: &str) -> Msg {
+        Msg::User { text: text.into(), images: Vec::new() }
+    }
+
+    fn assistant(text: &str) -> Msg {
+        Msg::Assistant { text: text.into(), calls: Vec::new() }
+    }
+
+    fn known() -> Vec<String> {
+        tool_names(&tool_specs(true))
+    }
+
     #[test]
     fn a_conversation_opens_with_the_user_and_alternates() {
         let history = [
@@ -753,55 +1090,129 @@ mod tests {
             line(Role::System, "Tomo looked at your screen"),
             line(Role::Assistant, "Yes!"),
         ];
-        let turns = conversation(&history, "cool");
-        assert_eq!(
-            turns,
-            vec![
-                json!({ "role": "user", "content": "hey\n\nyou there?" }),
-                json!({ "role": "assistant", "content": "Yes!" }),
-                json!({ "role": "user", "content": "cool" }),
-            ]
-        );
+        assert_eq!(conversation(&history, "cool"), vec![user("hey\n\nyou there?"), assistant("Yes!"), user("cool")]);
     }
 
     #[test]
     fn a_new_line_after_an_unanswered_one_joins_it() {
-        let turns = conversation(&[line(Role::User, "first")], "second");
-        assert_eq!(turns, vec![json!({ "role": "user", "content": "first\n\nsecond" })]);
-        assert_eq!(conversation(&[], "hello"), vec![json!({ "role": "user", "content": "hello" })]);
+        assert_eq!(conversation(&[line(Role::User, "first")], "second"), vec![user("first\n\nsecond")]);
+        assert_eq!(conversation(&[], "hello"), vec![user("hello")]);
     }
 
     #[test]
-    fn the_api_root_tolerates_a_v1_suffix() {
-        assert_eq!(api_root("https://api.anthropic.com"), "https://api.anthropic.com");
-        assert_eq!(api_root("https://api.anthropic.com/v1"), "https://api.anthropic.com");
-        assert_eq!(api_root("https://proxy.local/v1/"), "https://proxy.local");
+    fn it_looks_for_ollama_then_lm_studio() {
+        let auto = server_candidates(LlmProvider::Auto, "").unwrap();
+        assert_eq!(auto, vec![(Api::Ollama, OLLAMA_URL.to_string()), (Api::OpenAi, LM_STUDIO_URL.to_string())]);
+        let lm = server_candidates(LlmProvider::LmStudio, "http://pc:1234").unwrap();
+        assert_eq!(lm, vec![(Api::OpenAi, "http://pc:1234/v1".to_string())]);
+        let ollama = server_candidates(LlmProvider::Ollama, "http://box:11434/v1/").unwrap();
+        assert_eq!(ollama, vec![(Api::Ollama, "http://box:11434".to_string())]);
+        let guessed = server_candidates(LlmProvider::Auto, "http://localhost:11434").unwrap();
+        assert_eq!(guessed[0].0, Api::Ollama);
+        assert!(server_candidates(LlmProvider::OpenAiCompatible, "").is_err());
+        assert_eq!(openai_root("http://gpu:8080/openai/v1"), "http://gpu:8080/openai/v1");
     }
 
     #[test]
-    fn the_reply_is_the_text_blocks_only() {
-        let content = [
-            json!({ "type": "thinking", "thinking": "hmm", "signature": "x" }),
-            json!({ "type": "text", "text": "Sure." }),
-            json!({ "type": "tool_use", "id": "t1", "name": "animate", "input": { "clip": "wave" } }),
-            json!({ "type": "text", "text": " Waving! " }),
+    fn it_picks_a_local_chat_model() {
+        let models = [
+            ModelInfo { name: "gemma4:31b-cloud".into(), local: false },
+            ModelInfo { name: "nomic-embed-text".into(), local: true },
+            ModelInfo { name: "qwen2.5:7b".into(), local: true },
         ];
-        assert_eq!(reply_text(&content), "Sure.\n Waving!");
-        assert_eq!(reply_text(&[]), "");
+        assert_eq!(pick_model(&models).as_deref(), Some("qwen2.5:7b"));
+        assert_eq!(pick_model(&models[..2]), None);
+    }
+
+    #[test]
+    fn ollama_requests_carry_the_context_images_and_tool_calls() {
+        let call = ToolCall { id: "call_0".into(), name: "animate".into(), arguments: json!({ "clip": "wave" }) };
+        let messages = [
+            Msg::System("be nice".into()),
+            Msg::User { text: "look".into(), images: vec!["QUJD".into()] },
+            Msg::Assistant { text: String::new(), calls: vec![call] },
+            Msg::Tool { id: "call_0".into(), name: "animate".into(), content: "waving".into() },
+        ];
+        let tools = tool_specs(false);
+        let body = ollama_request("qwen2.5:7b", &messages, Some(&tools), 8192);
+        assert_eq!(body["options"]["num_ctx"], 8192);
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["messages"][1]["images"][0], "QUJD");
+        assert_eq!(body["messages"][2]["tool_calls"][0]["function"]["arguments"]["clip"], "wave");
+        assert_eq!(body["messages"][3]["role"], "tool");
+        assert_eq!(body["messages"][3]["tool_name"], "animate");
+        assert!(body["tools"].as_array().is_some_and(|t| !t.is_empty()));
+        assert!(ollama_request("m", &messages, None, 4096).get("tools").is_none());
+    }
+
+    #[test]
+    fn openai_requests_use_data_urls_and_json_text_arguments() {
+        let call = ToolCall { id: "abc".into(), name: "walk_to".into(), arguments: json!({ "position": 0.5 }) };
+        let messages = [
+            Msg::User { text: "look".into(), images: vec!["QUJD".into()] },
+            Msg::Assistant { text: String::new(), calls: vec![call] },
+            Msg::Tool { id: "abc".into(), name: "walk_to".into(), content: "ok".into() },
+        ];
+        let tools = tool_specs(true);
+        let body = openai_request("local-model", &messages, Some(&tools));
+        assert_eq!(body["messages"][0]["content"][1]["image_url"]["url"], "data:image/jpeg;base64,QUJD");
+        assert_eq!(body["messages"][1]["content"], Value::Null);
+        assert_eq!(body["messages"][1]["tool_calls"][0]["function"]["arguments"], "{\"position\":0.5}");
+        assert_eq!(body["messages"][2]["tool_call_id"], "abc");
+        assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn replies_are_read_in_both_formats() {
+        let ollama = json!({ "message": { "role": "assistant", "content": "", "tool_calls": [
+            { "function": { "name": "express", "arguments": { "emotion": "happy" } } }
+        ] } });
+        let (text, calls) = parse_ollama(&ollama).unwrap();
+        assert!(text.is_empty());
+        assert_eq!(calls[0].name, "express");
+        assert_eq!(calls[0].arguments["emotion"], "happy");
+        assert_eq!(calls[0].id, "call_0");
+
+        let openai = json!({ "choices": [ { "message": { "content": "Sure!", "tool_calls": [
+            { "id": "t1", "type": "function", "function": { "name": "animate", "arguments": "{\"clip\":\"wave\"}" } }
+        ] } } ] });
+        let (text, calls) = parse_openai(&openai).unwrap();
+        assert_eq!(text, "Sure!");
+        assert_eq!((calls[0].id.as_str(), calls[0].arguments["clip"].as_str()), ("t1", Some("wave")));
+
+        assert!(parse_ollama(&json!({ "error": "model not found" })).is_err());
+        assert!(parse_openai(&json!({ "error": { "message": "bad request" } })).is_err());
+    }
+
+    #[test]
+    fn thinking_stays_out_of_the_reply() {
+        assert_eq!(without_thinking("<think>hmm, a wave?</think>Hi there!"), "Hi there!");
+        assert_eq!(without_thinking("planning…</think>Okay!"), "Okay!");
+        assert_eq!(without_thinking("No notes."), "No notes.");
+    }
+
+    #[test]
+    fn tool_calls_written_into_the_text_are_understood() {
+        let text = "Sure! <tool_call>{\"name\": \"animate\", \"arguments\": {\"clip\": \"wave\"}}</tool_call>";
+        let (rest, calls) = tidy(text, Vec::new(), &known());
+        assert_eq!(rest, "Sure!");
+        assert_eq!(calls[0].name, "animate");
+        assert_eq!(calls[0].arguments["clip"], "wave");
+
+        let bare = "{\"name\": \"walk_to\", \"parameters\": {\"position\": 0.2}}";
+        let (rest, calls) = tidy(bare, Vec::new(), &known());
+        assert!(rest.is_empty());
+        assert_eq!(calls[0].arguments["position"], 0.2);
+
+        let (rest, calls) = tidy("{\"name\": \"rm_rf\"}", Vec::new(), &known());
+        assert!(calls.is_empty(), "only known tools");
+        assert_eq!(rest, "{\"name\": \"rm_rf\"}");
     }
 
     #[test]
     fn screen_tools_are_offered_only_when_allowed() {
-        let names = |allow| -> Vec<String> {
-            tool_specs(allow)
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|t| t["name"].as_str().unwrap().to_string())
-                .collect()
-        };
-        let with = names(true);
-        let without = names(false);
+        let with = tool_names(&tool_specs(true));
+        let without = tool_names(&tool_specs(false));
         for tool in ["look_at_screen", "find_on_screen"] {
             assert!(with.iter().any(|n| n == tool));
             assert!(!without.iter().any(|n| n == tool));
@@ -811,8 +1222,9 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), with.len(), "tool names are unique");
         for tool in tool_specs(true).as_array().unwrap() {
-            assert_eq!(tool["input_schema"]["type"], "object", "{}", tool["name"]);
-            assert!(!tool["description"].as_str().unwrap_or("").is_empty());
+            assert_eq!(tool["type"], "function");
+            assert_eq!(tool["function"]["parameters"]["type"], "object", "{}", tool["function"]["name"]);
+            assert!(!tool["function"]["description"].as_str().unwrap_or("").is_empty());
         }
     }
 
@@ -820,5 +1232,127 @@ mod tests {
     fn errors_are_cut_short() {
         assert_eq!(truncate_err(&"é".repeat(1000)).chars().count(), 400);
         assert_eq!(truncate_err("short"), "short");
+    }
+
+    /// A stand-in model server: answers each request with the next canned
+    /// reply for its path, and keeps the requests' bodies.
+    async fn fake_server(replies: Vec<(&'static str, Value)>) -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            let mut replies = replies;
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut buf = [0u8; 65536];
+                // Read the head, then as much body as it announces.
+                loop {
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                    let text = String::from_utf8_lossy(&request);
+                    if let Some(head_end) = text.find("\r\n\r\n") {
+                        let length = text[..head_end]
+                            .lines()
+                            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                            .unwrap_or(0);
+                        if request.len() >= head_end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&request).to_string();
+                let path = text.split_whitespace().nth(1).unwrap_or("").to_string();
+                if let Some(body) = text.split("\r\n\r\n").nth(1) {
+                    if let Ok(json) = serde_json::from_str::<Value>(body) {
+                        log.lock().unwrap().push(json);
+                    }
+                }
+                let index = replies.iter().position(|(p, _)| path.ends_with(p));
+                let body = match index {
+                    Some(i) if replies.iter().filter(|(p, _)| path.ends_with(p)).count() > 1 => replies.remove(i).1,
+                    Some(i) => replies[i].1.clone(),
+                    None => json!({ "error": "not found" }),
+                };
+                let body = body.to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        (url, seen)
+    }
+
+    fn client(url: &str, provider: LlmProvider) -> AiClient {
+        let tmp = std::env::temp_dir().join(format!("tomo-ai-test-{}", std::process::id()));
+        let mut cfg = Config::for_tests(&tmp);
+        cfg.llm_provider = provider;
+        cfg.llm_url = url.to_string();
+        let executor = Executor::new(false, tmp.join("audit.log"), Vec::new());
+        AiClient::new(
+            cfg,
+            Db::open_in_memory().unwrap(),
+            executor,
+            Arc::new(RwLock::new(SystemCatalog::default())),
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_turn_with_ollama_runs_the_tools_then_answers() {
+        let (url, seen) = fake_server(vec![
+            ("/api/tags", json!({ "models": [
+                { "name": "gemma4:31b-cloud", "remote_host": "https://ollama.com" },
+                { "name": "qwen2.5:0.5b" }
+            ] })),
+            ("/api/chat", json!({ "message": { "role": "assistant", "content": "", "tool_calls": [
+                { "function": { "name": "animate", "arguments": { "clip": "wave" } } }
+            ] }, "done": true })),
+            ("/api/chat", json!({ "message": { "role": "assistant", "content": "<think>ok</think>Hi! *waves*" }, "done": true })),
+        ])
+        .await;
+        let ai = client(&url, LlmProvider::Ollama);
+        let (ui, mut from_brain) = tokio::sync::mpsc::unbounded_channel();
+        let reply = ai.respond("wave at me", &ui).await.unwrap();
+        assert_eq!(reply, "Hi! *waves*");
+        let mut waved = false;
+        while let Ok(event) = from_brain.try_recv() {
+            waved |= matches!(event, BrainToUi::Animate(ref clip) if clip == "wave");
+        }
+        assert!(waved, "the body got the gesture");
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["model"], "qwen2.5:0.5b", "the local model, not the cloud one");
+        assert_eq!(requests[1]["messages"].as_array().unwrap().last().unwrap()["role"], "tool");
+    }
+
+    #[tokio::test]
+    async fn a_turn_with_lm_studio_uses_the_openai_api() {
+        let (url, seen) = fake_server(vec![
+            ("/v1/models", json!({ "data": [ { "id": "text-embedding-nomic" }, { "id": "qwen2.5-7b-instruct" } ] })),
+            ("/v1/chat/completions", json!({ "choices": [ { "message": { "role": "assistant", "content": "Hello from LM Studio." } } ] })),
+        ])
+        .await;
+        let ai = client(&url, LlmProvider::LmStudio);
+        let (ui, _rx) = tokio::sync::mpsc::unbounded_channel();
+        assert_eq!(ai.respond("hi", &ui).await.unwrap(), "Hello from LM Studio.");
+        let requests = seen.lock().unwrap().clone();
+        assert_eq!(requests[0]["model"], "qwen2.5-7b-instruct");
+        assert_eq!(requests[0]["messages"][0]["role"], "system");
+    }
+
+    #[tokio::test]
+    async fn with_no_server_tomo_says_how_to_get_one() {
+        // Nothing listens on this port.
+        let ai = client("http://127.0.0.1:9", LlmProvider::Ollama);
+        let (ui, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let reply = ai.respond("hi", &ui).await.unwrap();
+        assert!(reply.contains("ollama pull"), "{reply}");
     }
 }

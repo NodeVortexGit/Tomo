@@ -2,12 +2,18 @@
 # =============================================================================
 #  Tomo — one-shot installer
 #
-#  Installs everything Tomo needs and builds it:
+#  Installs everything Tomo needs and builds it. Tomo runs entirely on this
+#  computer: no cloud services, no API keys.
 #    • system libraries for Bevy (graphics/X11/Wayland/Vulkan) + audio I/O
 #    • the Rust toolchain (via rustup) if it's missing
-#    • a Python virtualenv with edge-tts for text-to-speech, and Vosk + Whisper
-#      (plus their models) for the offline "Hey Tomo" wake word
+#    • a Python virtualenv with Piper (Tomo's voice) and Vosk + Whisper
+#      ("Hey Tomo" and the Talk button), plus their models
 #    • the release binary, a .env from the template, and a desktop entry
+#    • a check for a local model server (Ollama or LM Studio), offering to
+#      download a model for Ollama
+#
+#  (Windows has its own installer: Tomo-Setup-<version>.exe, built by the
+#  project's GitHub Actions from packaging/windows/.)
 #
 #  Supported package managers: apt, dnf, pacman, zypper (Debian/Ubuntu/Mint/Pop,
 #  Fedora/RHEL, Arch/Manjaro/EndeavourOS, openSUSE). Other distros: install the
@@ -19,6 +25,7 @@
 #     TOMO_SKIP_SYSDEPS=1   don't touch system packages (you installed them)
 #     TOMO_NO_BUILD=1       set up deps + venv but skip `cargo build`
 #     TOMO_PREFIX=~/.local  where to install the binary (default ~/.local)
+#     TOMO_MODEL=qwen2.5:7b the Ollama model to offer (default qwen2.5:7b)
 # =============================================================================
 set -euo pipefail
 
@@ -35,6 +42,7 @@ PREFIX="${TOMO_PREFIX:-$HOME/.local}"
 BIN_DIR="$PREFIX/bin"
 APPS_DIR="$HOME/.local/share/applications"
 DATA_DIR="${TOMO_DATA_DIR:-$HOME/.local/share/tomo}"
+MODEL="${TOMO_MODEL:-qwen2.5:7b}"
 
 hr
 printf "${c_bold}  Tomo installer${c_reset}  —  AI VRM desktop companion\n"
@@ -45,8 +53,7 @@ hr
 # edit even if a later step (packages, rustup, pip) errors out.
 if [ ! -f "$SCRIPT_DIR/.env" ]; then
     cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
-    ok "Created .env from template → $SCRIPT_DIR/.env"
-    warn "Edit it and add your ANTHROPIC_API_KEY before launching."
+    ok "Created .env from template → $SCRIPT_DIR/.env (the defaults work as they are)"
 else
     ok ".env already exists (left untouched)."
 fi
@@ -75,7 +82,7 @@ install_sysdeps() {
           libwayland-dev \
           libvulkan1 mesa-vulkan-drivers vulkan-tools \
           python3 python3-venv python3-pip \
-          mpv pulseaudio-utils alsa-utils grim
+          pulseaudio-utils alsa-utils grim zenity
         ;;
       dnf)
         sudo dnf install -y \
@@ -85,7 +92,7 @@ install_sysdeps() {
           wayland-devel \
           vulkan-loader mesa-vulkan-drivers vulkan-tools \
           python3 python3-pip \
-          mpv pulseaudio-utils alsa-utils grim
+          pulseaudio-utils alsa-utils grim zenity
         ;;
       pacman)
         sudo pacman -Sy --needed --noconfirm \
@@ -95,7 +102,7 @@ install_sysdeps() {
           wayland \
           vulkan-icd-loader vulkan-tools \
           python python-pip \
-          mpv libpulse alsa-utils grim
+          libpulse alsa-utils grim zenity
         ;;
       zypper)
         sudo zypper --non-interactive install -y \
@@ -105,7 +112,7 @@ install_sysdeps() {
           wayland-devel \
           vulkan-loader vulkan-tools \
           python3 python3-pip \
-          mpv pulseaudio-utils alsa-utils grim
+          pulseaudio-utils alsa-utils grim zenity
         ;;
     esac
     ok "System dependencies installed."
@@ -123,7 +130,7 @@ command -v cargo >/dev/null 2>&1 || die "cargo still not on PATH; open a new she
 ok "Rust toolchain: $(cargo --version)"
 
 # ---- 4. Python venv + speech deps ------------------------------------------
-say "Setting up Python virtualenv for speech…"
+say "Setting up the Python virtualenv for speech (Piper, Vosk, Whisper)…"
 VENV="$SCRIPT_DIR/scripts/.venv"
 python3 -m venv "$VENV"
 # shellcheck disable=SC1091
@@ -131,24 +138,35 @@ python3 -m venv "$VENV"
 "$VENV/bin/pip" install -r "$SCRIPT_DIR/scripts/requirements.txt"
 ok "Speech venv ready at scripts/.venv"
 
-# ---- 5. speech models for "Hey Tomo" (offline) ------------------------------
-MODELS="$DATA_DIR/models"
-mkdir -p "$MODELS"
-VOSK="vosk-model-small-en-us-0.15"
-if [ ! -d "$MODELS/$VOSK" ]; then
-    say "Downloading the wake-word model (Vosk, ~40 MB)…"
-    curl -fL --progress-bar -o "$MODELS/$VOSK.zip" "https://alphacephei.com/vosk/models/$VOSK.zip"
-    # Python's zipfile rather than `unzip`, which many systems lack.
-    "$VENV/bin/python" -c "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" \
-        "$MODELS/$VOSK.zip" "$MODELS"
-    rm -f "$MODELS/$VOSK.zip"
+# ---- 5. speech models (they run on this computer) ---------------------------
+say "Downloading the speech models (Vosk, Whisper and Tomo's voice, ~250 MB)…"
+if TOMO_DATA_DIR="$DATA_DIR" "$VENV/bin/python" "$SCRIPT_DIR/scripts/setup_models.py"; then
+    ok "Speech models ready in $DATA_DIR"
+else
+    warn "Some speech models didn't download; run scripts/setup_models.py again later."
 fi
-if [ ! -d "$MODELS/whisper-base.en" ]; then
-    say "Downloading the transcription model (Whisper base.en, ~145 MB)…"
-    "$VENV/bin/python" -c "import sys; from faster_whisper import download_model; download_model('base.en', output_dir=sys.argv[1])" \
-        "$MODELS/whisper-base.en"
+
+# ---- 5b. a local model to think with ---------------------------------------
+if command -v ollama >/dev/null 2>&1; then
+    ok "Ollama found."
+    if ! ollama list 2>/dev/null | awk 'NR > 1 && $3 != "-" { found = 1 } END { exit !found }'; then
+        warn "Ollama has no local model yet; Tomo needs one to think."
+        if [ -t 0 ]; then
+            read -r -p "  Download $MODEL now (a few GB)? [y/N] " answer
+            case "$answer" in
+                [yY]*) ollama pull "$MODEL" && ok "Model ready: $MODEL" ;;
+                *) warn "Later: ollama pull $MODEL" ;;
+            esac
+        else
+            warn "Later: ollama pull $MODEL"
+        fi
+    fi
+elif command -v lms >/dev/null 2>&1; then
+    ok "LM Studio found: start its local server and load a model."
+else
+    warn "No local model server found. Install Ollama (https://ollama.com/download)"
+    warn "or LM Studio (https://lmstudio.ai), then get a model: ollama pull $MODEL"
 fi
-ok "Speech models ready in $MODELS"
 
 # (.env was already created at step 0, before anything that could fail.)
 
@@ -171,7 +189,6 @@ Type=Application
 Name=Tomo
 Comment=AI-driven VRM desktop companion
 Exec=env TOMO_ROOT=$SCRIPT_DIR $BIN_DIR/tomo
-Icon=$SCRIPT_DIR/assets/icon.png
 Terminal=false
 Categories=Utility;
 X-GNOME-Autostart-enabled=true
@@ -184,9 +201,10 @@ hr
 ok "Tomo is set up."
 echo
 echo -e "${c_bold}Next steps:${c_reset}"
-echo "  1. Edit ${c_cya}$SCRIPT_DIR/.env${c_reset} and add your ANTHROPIC_API_KEY."
-echo "  2. Drop a VRoid .vrm at ${c_cya}$DATA_DIR/characters/default.vrm${c_reset}"
-echo "     (or set TOMO_CHARACTER in .env, or import one from the chat window)."
+echo "  1. Make sure Ollama (or LM Studio's server) is running with a model:"
+echo -e "        ${c_cya}ollama pull $MODEL${c_reset}"
+echo "  2. Optional: settings live in ${c_cya}$SCRIPT_DIR/.env${c_reset}; other characters"
+echo "     can go in ${c_cya}$DATA_DIR/characters/${c_reset} or be imported from the chat."
 echo "  3. Launch from your app menu (\"Tomo\"), or run:"
 echo -e "        ${c_cya}TOMO_ROOT=$SCRIPT_DIR $BIN_DIR/tomo${c_reset}"
 echo

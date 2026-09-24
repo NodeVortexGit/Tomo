@@ -6,17 +6,19 @@
 //!   • The overlay (Wayland with layer-shell: Hyprland, Sway, KDE Plasma, …) —
 //!     see overlay.rs. Not a window at all: a layer-shell surface above
 //!     everything, letting clicks through except where [`InputRegion`] says.
-//!   • A regular window (X11, GNOME Wayland) — built here: borderless,
-//!     transparent and always-on-top, as far as each compositor allows:
+//!   • A regular window (Windows, X11, GNOME Wayland) — built here:
+//!     borderless, transparent and always-on-top, as far as each system allows:
 //!
 //! ┌───────────────────────────────────────────────────────────────────────┐
-//! │ transparency        X11: ✔ works via a compositor (picom/kwin/mutter). │
+//! │ transparency        Windows: ✔ through DWM (winit).                    │
+//! │                     X11: ✔ works via a compositor (picom/kwin/mutter). │
 //! │                     Wayland: ✔ (pre-multiplied alpha, see below).       │
-//! │ always-on-top       X11: ✔ WindowLevel::AlwaysOnTop → _NET_WM_STATE.    │
+//! │ always-on-top       Windows, X11: ✔ WindowLevel::AlwaysOnTop.            │
 //! │                     GNOME Wayland: ✘ Mutter ignores it.                 │
-//! │ skip taskbar/pager  X11: ✔ skip_taskbar. Wayland: no winit support yet. │
-//! │ click-through       ✘ the whole window catches the mouse — see          │
-//! │                     `TODO(input-region)` below.                         │
+//! │ skip taskbar        Windows, X11: ✔ skip_taskbar.                        │
+//! │ click-through       Windows: ✔ hit-testing follows the cursor, on only  │
+//! │                     over the character and the chat (see `windows`).   │
+//! │                     X11/GNOME: ✘ — see `TODO(input-region)` below.      │
 //! └───────────────────────────────────────────────────────────────────────┘
 
 use bevy::prelude::*;
@@ -27,8 +29,8 @@ use crate::session::{DisplayServer, Session};
 /// The parts of the screen Tomo wants the mouse on (logical pixels, origin
 /// top-left) — the character, and the chat while it's open — and whether the
 /// chat wants the keyboard. Everywhere else, clicks fall through to the
-/// desktop. Only the overlay can honour this; a regular window catches the
-/// mouse everywhere.
+/// desktop. The overlay and Windows honour this; elsewhere a regular window
+/// catches the mouse everywhere.
 #[derive(Resource, Default, Clone, PartialEq, Eq)]
 pub struct InputRegion {
     pub character: Option<IRect>,
@@ -58,9 +60,14 @@ pub fn overlay_window(session: &Session) -> Window {
     // that (it always does), and the transparent clear colour then shows up as
     // a black box instead of transparency — the classic first bug on a new
     // setup.
+    //
+    // Windows is the exception: its GPU drivers mostly offer only `Opaque`,
+    // and DWM makes the window see-through by its alpha anyway (winit
+    // enables that), so `Auto` there. macOS composites post-multiplied.
     let composite_alpha_mode = match session.server {
         DisplayServer::X11 | DisplayServer::Wayland => CompositeAlphaMode::PreMultiplied,
-        DisplayServer::Unknown => CompositeAlphaMode::Auto,
+        DisplayServer::MacOs => CompositeAlphaMode::PostMultiplied,
+        DisplayServer::Windows | DisplayServer::Unknown => CompositeAlphaMode::Auto,
     };
 
     Window {
@@ -90,7 +97,7 @@ pub fn recommended_backend(session: &Session) -> &'static str {
     match session.server {
         DisplayServer::Wayland => "wayland",
         DisplayServer::X11 => "x11",
-        DisplayServer::Unknown => "auto",
+        DisplayServer::Windows | DisplayServer::MacOs | DisplayServer::Unknown => "auto",
     }
 }
 
@@ -112,13 +119,92 @@ pub fn log_environment_notes(session: &Session) {
                        (Hyprland, Sway) and KDE float it above everything.");
             }
         }
+        DisplayServer::Windows => {
+            info!("Windows: if Tomo's background shows black instead of the desktop, \
+                   set TOMO_RENDERER=gl (or dx12) in .env, or use the \
+                   \"Tomo (compatibility)\" shortcut.");
+        }
+        DisplayServer::MacOs => {}
         DisplayServer::Unknown => {
             warn!("Could not detect the display server; using winit defaults.");
         }
     }
 }
 
-/// Resize the window to fill the primary monitor once winit knows its size.
+/// In a regular window, keep Bevy's winit loop as lazy as the overlay's:
+/// at the display's rate while something moves, 24 fps at rest.
+pub fn pace_frames(busy: Res<Busy>, mut settings: ResMut<bevy::winit::WinitSettings>) {
+    use bevy::winit::UpdateMode;
+    let mode = if busy.0 {
+        UpdateMode::Continuous
+    } else {
+        UpdateMode::reactive(std::time::Duration::from_micros(41_667))
+    };
+    if settings.focused_mode != mode {
+        settings.focused_mode = mode;
+        settings.unfocused_mode = mode;
+    }
+}
+
+/// Windows: fill the work area (the screen minus the taskbar, so the taskbar
+/// is her floor), and let clicks through everywhere but the character and
+/// the chat.
+#[cfg(windows)]
+pub mod windows {
+    use bevy::prelude::*;
+    use bevy::window::{PrimaryWindow, WindowPosition};
+    use windows_sys::Win32::Foundation::{POINT, RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorPos, SystemParametersInfoW, SPI_GETWORKAREA};
+
+    use super::InputRegion;
+
+    /// The primary monitor's work area, in physical pixels.
+    fn work_area() -> Option<RECT> {
+        let mut area = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        // SAFETY: SPI_GETWORKAREA writes one RECT to the pointer given.
+        let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, (&mut area as *mut RECT).cast(), 0) };
+        (ok != 0 && area.right > area.left && area.bottom > area.top).then_some(area)
+    }
+
+    /// Place and size the window over the work area, once.
+    pub fn fit_to_work_area(mut done: Local<bool>, mut windows: Query<&mut Window, With<PrimaryWindow>>) {
+        if *done {
+            return;
+        }
+        let (Ok(mut window), Some(area)) = (windows.get_single_mut(), work_area()) else { return };
+        window.position = WindowPosition::At(IVec2::new(area.left, area.top));
+        window
+            .resolution
+            .set_physical_resolution((area.right - area.left) as u32, (area.bottom - area.top) as u32);
+        *done = true;
+    }
+
+    /// Turn the window's hit-testing on only while the cursor is over the
+    /// character or the chat: everywhere else, clicks go to the desktop.
+    pub fn click_through(mut windows: Query<&mut Window, With<PrimaryWindow>>, region: Res<InputRegion>) {
+        let Ok(mut window) = windows.get_single_mut() else { return };
+        let mut cursor = POINT { x: 0, y: 0 };
+        // SAFETY: GetCursorPos writes one POINT to the pointer given.
+        if unsafe { GetCursorPos(&mut cursor) } == 0 {
+            return;
+        }
+        let origin = match window.position {
+            WindowPosition::At(position) => position.as_vec2(),
+            _ => Vec2::ZERO,
+        };
+        let at = (Vec2::new(cursor.x as f32, cursor.y as f32) - origin) / window.resolution.scale_factor();
+        let over = [region.character, region.chat]
+            .into_iter()
+            .flatten()
+            .any(|rect| rect.as_rect().contains(at));
+        if window.cursor_options.hit_test != over {
+            window.cursor_options.hit_test = over;
+        }
+    }
+}
+
+/// Resize the window to fill the primary monitor once winit knows its size
+/// (on Windows, [`windows::fit_to_work_area`] does it instead).
 /// Runs a few frames after startup (monitor info isn't ready at frame 0).
 pub fn fit_to_primary_monitor(
     mut windows: Query<&mut Window, With<PrimaryWindow>>,

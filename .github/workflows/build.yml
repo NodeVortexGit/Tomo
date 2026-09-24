@@ -1,0 +1,73 @@
+# Tests and lints on Linux and Windows; on Windows, also the installer,
+# Tomo-Setup-<version>.exe — kept as a build artifact, and attached to the
+# GitHub release when a version tag (v0.2.0, …) is pushed.
+
+name: Build
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux — tests and lints
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  windows:
+    name: Windows — tests, lints and the installer
+    runs-on: windows-2022
+    permissions:
+      contents: write # to attach the installer to a release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo build --release -p tomo-app
+
+      - name: uv, which sets up the speech helpers' Python at install time
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip -OutFile uv.zip
+          Expand-Archive uv.zip -DestinationPath packaging/windows/uv -Force
+          if (-not (Test-Path packaging/windows/uv/uv.exe)) { throw "uv.exe missing from the download" }
+
+      - name: The installer
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path crates/tomo-app/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("${{ github.ref_type }}" -eq "tag") { $version = "${{ github.ref_name }}".TrimStart("v") }
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          & $iscc "/DAppVersion=$version" packaging/windows/tomo.iss
+          if ($LASTEXITCODE -ne 0) { throw "the installer didn't build" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Tomo-Setup-windows
+          path: packaging/windows/Output/*.exe
+          if-no-files-found: error
+
+      - name: Attach to the release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packaging/windows/Output/*.exe

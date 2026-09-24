@@ -1,8 +1,9 @@
 //! Which characters (`.vrm` models) Tomo can appear as, and switching
 //! between them.
 //!
-//! The choices are every `.vrm` in the configured character's folder and in
-//! the data dir's `characters/`, plus any imported file the database knows.
+//! The choices are every `.vrm` in the configured character's folder, the
+//! data dir's `characters/` and the bundled `assets/characters/`, plus any
+//! imported file the database knows.
 //! Switching — from the chat's character menu, or by asking Tomo (the
 //! `change_character` tool) — remembers the choice for the next start. A file
 //! from anywhere else is copied into the data dir first, so it keeps working
@@ -18,14 +19,16 @@ use crate::db::Db;
 use crate::events::CharacterChoice;
 
 /// The character to show at start: the last one chosen, else the configured
-/// one — whichever exists. Canonical, so the app's asset loader takes it as
-/// is rather than resolving it against its own asset folder.
+/// one, else the first on offer (a fresh install's bundled one) — whichever
+/// exists. Canonical, so the app's asset loader takes it as is rather than
+/// resolving it against its own asset folder.
 pub(crate) fn startup(db: &Db, cfg: &Config) -> Option<PathBuf> {
     let chosen = db.active_character().ok().flatten().map(|c| PathBuf::from(c.path));
     chosen
         .into_iter()
         .chain(std::iter::once(cfg.character_path.clone()))
         .find_map(|p| p.canonicalize().ok())
+        .or_else(|| available(db, cfg).into_iter().next().map(|c| c.path))
 }
 
 /// Every character on offer, sorted by name.
@@ -85,10 +88,10 @@ pub(crate) fn stem(path: &Path) -> String {
     path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
 }
 
-/// Where characters live: the configured character's folder and the data
-/// dir's `characters/`.
+/// Where characters live: the configured character's folder, the data dir's
+/// `characters/` and the bundled ones.
 fn folders(cfg: &Config) -> Vec<PathBuf> {
-    let mut dirs = vec![cfg.data_dir.join("characters")];
+    let mut dirs = vec![cfg.data_dir.join("characters"), cfg.assets_dir.join("characters")];
     if let Some(parent) = cfg.character_path.parent() {
         dirs.push(parent.to_path_buf());
     }
@@ -126,6 +129,18 @@ mod tests {
         assert_eq!(loaded, ayako.canonicalize().unwrap(), "used in place, not copied");
         assert_eq!(startup(&db, &cfg), Some(loaded));
         assert_eq!(available(&db, &cfg).len(), 2, "no duplicate for the remembered one");
+    }
+
+    #[test]
+    fn a_fresh_install_shows_a_bundled_character() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = Config::for_tests(tmp.path());
+        let bundled = cfg.assets_dir.join("characters");
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::write(bundled.join("Tomo.vrm"), b"glTF").unwrap();
+        let db = Db::open_in_memory().unwrap();
+        assert!(!cfg.character_path.exists(), "nothing configured");
+        assert_eq!(startup(&db, &cfg), Some(bundled.join("Tomo.vrm").canonicalize().unwrap()));
     }
 
     #[test]

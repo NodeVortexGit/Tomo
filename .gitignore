@@ -23,3 +23,7 @@ mic.wav
 # local unless the licence allows redistribution — then whitelist them here.
 assets/characters/*.vrm
 !assets/characters/female model.vrm
+
+# Windows installer build products (packaging/windows)
+packaging/windows/uv/
+packaging/windows/Output/

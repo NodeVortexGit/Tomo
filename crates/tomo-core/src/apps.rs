@@ -3,15 +3,17 @@
 //! Two things are discovered here, both straight from the operating system so
 //! nothing is hard-coded per machine:
 //!
-//!   • **Apps** — every installed launcher, parsed from the freedesktop
-//!     `.desktop` files in the standard XDG locations (system, user, and
-//!     Flatpak). Each gives us a name, an icon name, and the exact command to
-//!     launch it. This is what lets the character "know" your apps.
+//!   • **Apps** — every installed launcher. On Linux, parsed from the
+//!     freedesktop `.desktop` files in the standard XDG locations (system,
+//!     user, and Flatpak), each giving a name, an icon name and the exact
+//!     command to launch it; on Windows, the Start Menu's shortcuts, which
+//!     `Start-Process` opens. This is what lets the character "know" your apps.
 //!
 //!   • **Toggles** — which system switches are actually available on THIS box
-//!     (Bluetooth, Wi-Fi, volume, brightness), decided by probing for the
-//!     tools that drive them (`rfkill`, `nmcli`, `pactl`/`wpctl`,
-//!     `brightnessctl`). No tool present → that toggle simply isn't offered.
+//!     (Bluetooth, Wi-Fi, mute), decided by probing for the tools that drive
+//!     them (`rfkill`, `nmcli`, `pactl`/`wpctl`). No tool present → that toggle
+//!     simply isn't offered. (Windows has no such tools built in; there the
+//!     model uses PowerShell through `execute_command` instead.)
 //!
 //! The whole thing is fingerprinted so the brain can scan once at boot and
 //! then, on a light periodic re-scan, notice when something was installed or
@@ -61,13 +63,17 @@ pub struct SystemCatalog {
 }
 
 impl SystemCatalog {
-    /// Scan the OS: parse all `.desktop` entries and probe for toggles.
+    /// Scan the OS: its app launchers, and the toggles it has tools for.
     pub fn scan() -> Self {
-        let mut apps = parse_all_entries(&application_dirs());
+        let mut apps = if cfg!(windows) {
+            start_menu_apps(&start_menu_dirs())
+        } else {
+            parse_all_entries(&application_dirs())
+        };
         apps.sort_by_cached_key(|a| a.name.to_lowercase());
         SystemCatalog {
             apps,
-            toggles: probe_toggles(),
+            toggles: if cfg!(windows) { Vec::new() } else { probe_toggles() },
         }
     }
 
@@ -337,17 +343,57 @@ fn probe_toggles() -> Vec<Toggle> {
 
 /// True if `name` is an executable on `PATH`. Pure PATH scan — no subprocess.
 pub fn has_binary(name: &str) -> bool {
-    let Ok(path) = std::env::var("PATH") else { return false };
-    for dir in path.split(':') {
-        if dir.is_empty() {
-            continue;
-        }
-        let candidate = Path::new(dir).join(name);
-        if candidate.is_file() {
-            return true;
+    crate::platform::which(name).is_some()
+}
+
+/// Where Windows keeps the Start Menu's shortcuts: for everyone, and for
+/// this user.
+fn start_menu_dirs() -> Vec<PathBuf> {
+    ["ProgramData", "APPDATA"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(|base| PathBuf::from(base).join("Microsoft").join("Windows").join("Start Menu").join("Programs"))
+        .collect()
+}
+
+/// The apps behind the Start Menu's shortcuts (`.lnk`), minus uninstallers.
+/// Opening a shortcut starts the app, so that's the launch command.
+fn start_menu_apps(dirs: &[PathBuf]) -> Vec<DesktopApp> {
+    fn walk(dir: &Path, depth: usize, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && depth < 4 {
+                walk(&path, depth + 1, found);
+            } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("lnk")) {
+                found.push(path);
+            }
         }
     }
-    false
+    let mut shortcuts = Vec::new();
+    for dir in dirs {
+        walk(dir, 0, &mut shortcuts);
+    }
+    let mut seen = std::collections::HashSet::new();
+    shortcuts
+        .into_iter()
+        .filter_map(|path| {
+            let name = path.file_stem()?.to_string_lossy().to_string();
+            let lower = name.to_lowercase();
+            if lower.contains("uninstall") || !seen.insert(lower.clone()) {
+                return None;
+            }
+            let quoted = path.display().to_string().replace('\'', "''");
+            Some(DesktopApp {
+                id: lower,
+                exec: format!("Start-Process -FilePath '{quoted}'"),
+                name,
+                icon: String::new(),
+                categories: Vec::new(),
+                terminal: false,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -411,6 +457,22 @@ Categories=Network;WebBrowser;
         let hits = cat.find_app("fire");
         assert_eq!(hits[0].name, "Fireworks"); // name prefix beats "contains"
         assert!(hits.iter().any(|a| a.name == "Xfire chat"));
+    }
+
+    #[test]
+    fn start_menu_shortcuts_become_apps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let menu = tmp.path().join("Programs");
+        std::fs::create_dir_all(menu.join("Mozilla")).unwrap();
+        for file in ["Mozilla/Firefox.lnk", "Mozilla/Uninstall Firefox.lnk", "Notepad.lnk", "readme.txt"] {
+            std::fs::write(menu.join(file), b"").unwrap();
+        }
+        let mut apps = start_menu_apps(&[menu.clone(), menu]);
+        apps.sort_by_cached_key(|a| a.name.clone());
+        let names: Vec<_> = apps.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, ["Firefox", "Notepad"], "no uninstallers, no duplicates");
+        assert!(apps[0].exec.starts_with("Start-Process -FilePath '"));
+        assert!(apps[0].exec.ends_with("Firefox.lnk'"));
     }
 
     #[test]

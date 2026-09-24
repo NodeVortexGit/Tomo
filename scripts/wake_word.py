@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Always-on "Hey Tomo" listener, fully offline.
+"""Voice input for Tomo — "Hey Tomo" and push-to-talk — fully offline.
 
 Runs as a long-lived child of Tomo's brain (see crates/tomo-core/src/wake.rs).
-It reads the microphone as 16 kHz mono PCM (parecord / pw-record / arecord)
-and works in two stages:
+It reads the microphone as 16 kHz mono PCM (parecord / pw-record / arecord on
+Linux, PortAudio through `sounddevice` on Windows and macOS) and works in two
+stages:
 
   1. Vosk, restricted to a tiny grammar, spots the wake phrase for very little
      CPU;
@@ -21,6 +22,12 @@ No audio leaves the machine. Output is one JSON object per line on stdout:
 
 Lines on stdin steer it: "listen" (push-to-talk: skip the wake phrase),
 "mute" / "unmute" (e.g. while Tomo speaks, so she can't wake herself).
+
+With --push-to-talk there's no wake phrase: the microphone opens only for a
+"listen", and closes again once the request is in.
+
+Whisper runs on the CPU unless TOMO_WHISPER_DEVICE says "cuda" (an NVIDIA
+card with CUDA 12 and cuDNN 9 installed).
 
 Test without a microphone:  wake_word.py --vosk DIR --whisper DIR --file clip.mp3
 """
@@ -66,21 +73,36 @@ def emit(event, **fields):
 
 
 def microphone():
-    """Yield 0.25 s chunks of 16-bit audio from the first recorder that works."""
-    for command in RECORDERS:
-        try:
-            recorder = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        except FileNotFoundError:
-            continue
-        chunk = recorder.stdout.read(CHUNK * 2)
-        if len(chunk) < CHUNK * 2:
-            recorder.kill()
-            continue
-        while len(chunk) == CHUNK * 2:
-            yield chunk
-            chunk = recorder.stdout.read(CHUNK * 2)
-        raise RuntimeError(f"{command[0]} stopped recording")
-    raise RuntimeError("no microphone recorder worked (tried parecord, pw-record, arecord)")
+    """Yield 0.25 s chunks of 16-bit audio: from the first recorder program
+    that works on Linux, else through PortAudio. Closing the generator stops
+    the recording."""
+    if sys.platform.startswith("linux"):
+        for command in RECORDERS:
+            try:
+                recorder = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            except FileNotFoundError:
+                continue
+            try:
+                chunk = recorder.stdout.read(CHUNK * 2)
+                if len(chunk) < CHUNK * 2:
+                    continue
+                while len(chunk) == CHUNK * 2:
+                    yield chunk
+                    chunk = recorder.stdout.read(CHUNK * 2)
+                raise RuntimeError(f"{command[0]} stopped recording")
+            finally:
+                recorder.kill()
+    try:
+        import sounddevice
+    except ImportError:
+        raise RuntimeError("no microphone recorder worked (tried parecord, pw-record, arecord)")
+    chunks = queue.Queue()
+    with sounddevice.RawInputStream(
+        samplerate=RATE, blocksize=CHUNK, channels=1, dtype="int16",
+        callback=lambda data, frames, time, status: chunks.put(bytes(data)),
+    ):
+        while True:
+            yield chunks.get()
 
 
 def audio_file(path):
@@ -102,7 +124,9 @@ class Listener:
         self.KaldiRecognizer = KaldiRecognizer
         self.vosk = Model(vosk_dir)
         self.spotter = KaldiRecognizer(self.vosk, RATE, json.dumps(WAKE_GRAMMAR))
-        self.whisper = WhisperModel(whisper_dir, device="cpu", compute_type="int8", cpu_threads=4)
+        device = os.environ.get("TOMO_WHISPER_DEVICE", "cpu")
+        compute = "float16" if device == "cuda" else "int8"
+        self.whisper = WhisperModel(whisper_dir, device=device, compute_type=compute, cpu_threads=4)
         self.pre_roll = collections.deque(maxlen=PRE_ROLL_CHUNKS)
         self.commands = queue.Queue()
         self.muted = False
@@ -126,6 +150,20 @@ class Listener:
                 self.spotter.Reset()
                 self.confirm_wake(chunks)
                 self.pre_roll.clear()
+
+    def push_to_talk(self):
+        """No wake phrase: open the microphone only when asked, for one
+        request, then close it again."""
+        emit("ready")
+        while True:
+            if self.commands.get() != "listen":
+                continue
+            emit("wake")
+            chunks = microphone()
+            try:
+                self.take_request(chunks)
+            finally:
+                chunks.close()
 
     def steer(self):
         """Apply pending stdin commands; return "listen" if one asks for it."""
@@ -199,6 +237,7 @@ def main():
     parser.add_argument("--vosk", required=True, help="Vosk model directory")
     parser.add_argument("--whisper", required=True, help="faster-whisper model directory")
     parser.add_argument("--file", help="read audio from this file instead of the microphone")
+    parser.add_argument("--push-to-talk", action="store_true", help="no wake phrase; listen only when asked")
     args = parser.parse_args()
     try:
         listener = Listener(args.vosk, args.whisper)
@@ -210,7 +249,10 @@ def main():
                 os._exit(0)  # stdin closed: Tomo is gone, stop using the mic
 
             threading.Thread(target=read_commands, daemon=True).start()
-        listener.run(audio_file(args.file) if args.file else microphone())
+        if args.push_to_talk and not args.file:
+            listener.push_to_talk()
+        else:
+            listener.run(audio_file(args.file) if args.file else microphone())
     except Exception as error:  # report, don't traceback: the brain reads stdout
         emit("error", message=str(error))
         sys.exit(1)

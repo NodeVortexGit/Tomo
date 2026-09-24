@@ -2,7 +2,7 @@
 name = "tomo-app"
 version = "0.1.0"
 edition = "2021"
-description = "The body of Tomo: the Bevy app that renders the VRM character, walks it across a transparent desktop overlay, and grows the liquid chat window. Depends on tomo-core for all decision-making."
+description = "The body of Tomo: the Bevy app that renders the VRM character, walks it across a transparent desktop overlay on Linux and Windows, and grows the liquid chat window. Depends on tomo-core for all decision-making."
 license = "MIT"
 
 [[bin]]
@@ -34,14 +34,6 @@ bevy = { version = "0.15", features = ["wayland"] }
 # Must match bevy's minor version (0.31 targets bevy 0.15).
 bevy_egui = "0.31"
 
-# --- Desktop overlay (Wayland layer-shell) -----------------------------------
-# winit can't create layer-shell surfaces — what lets Tomo float above every
-# window without being one (see src/overlay.rs). winit already links these, so
-# they add almost nothing to the build; `xkbcommon` turns Wayland key codes
-# into text for the chat box.
-smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop", "xkbcommon"] }
-wayland-backend = { version = "0.3", features = ["client_system"] }
-raw-window-handle = "0.6"
 
 # Cross-platform input synthesis (move the cursor, click, type) — the same
 # mechanism as xdotool/ydotool and accessibility tools. OPTIONAL and off by
@@ -49,6 +41,20 @@ raw-window-handle = "0.6"
 # needs a running `ydotoold`; the app builds and runs fully without it (the
 # control paths log what they *would* do). See src/input.rs.
 enigo = { version = "0.2", optional = true }
+
+# --- Desktop overlay (Linux: Wayland layer-shell) ---------------------------
+# winit can't create layer-shell surfaces — what lets Tomo float above every
+# window without being one (see src/overlay.rs). winit already links these, so
+# they add almost nothing to the build; `xkbcommon` turns Wayland key codes
+# into text for the chat box.
+[target.'cfg(target_os = "linux")'.dependencies]
+smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop", "xkbcommon"] }
+wayland-backend = { version = "0.3", features = ["client_system"] }
+raw-window-handle = "0.6"
+
+# --- Windows: the cursor's position and the work area, for click-through --
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [features]
 default = []

@@ -335,13 +335,31 @@ fn character_menu(
 fn pick_character_file(to_brain: tokio::sync::mpsc::UnboundedSender<UiToBrain>) {
     std::thread::spawn(move || {
         let title = "Choose a character (.vrm)";
-        let dialogs: [(&str, Vec<&str>); 2] = [
-            ("zenity", vec!["--file-selection", "--title", title, "--file-filter=VRM models | *.vrm *.VRM"]),
-            ("kdialog", vec!["--title", title, "--getopenfilename", ".", "*.vrm *.VRM|VRM models"]),
-        ];
+        let windows_dialog = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; \
+             $d = New-Object System.Windows.Forms.OpenFileDialog; \
+             $d.Title = '{title}'; $d.Filter = 'VRM models|*.vrm'; \
+             if ($d.ShowDialog() -eq 'OK') {{ $d.FileName }}"
+        );
+        let dialogs: Vec<(&str, Vec<&str>)> = if cfg!(windows) {
+            vec![("powershell.exe", vec!["-NoProfile", "-STA", "-Command", &windows_dialog])]
+        } else {
+            vec![
+                ("zenity", vec!["--file-selection", "--title", title, "--file-filter=VRM models | *.vrm *.VRM"]),
+                ("kdialog", vec!["--title", title, "--getopenfilename", ".", "*.vrm *.VRM|VRM models"]),
+            ]
+        };
         for (program, args) in dialogs {
+            let mut command = std::process::Command::new(program);
+            command.args(&args);
+            #[cfg(windows)]
+            {
+                // The dialog, without a console window behind it.
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x0800_0000);
+            }
             // Not installed: try the next. Cancelled: done.
-            let Ok(out) = std::process::Command::new(program).args(&args).output() else {
+            let Ok(out) = command.output() else {
                 continue;
             };
             let path = std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
@@ -351,7 +369,7 @@ fn pick_character_file(to_brain: tokio::sync::mpsc::UnboundedSender<UiToBrain>) 
             }
             return;
         }
-        warn!("no file dialog to pick a character with (install zenity or kdialog)");
+        warn!("no file dialog to pick a character with (on Linux, install zenity or kdialog)");
     });
 }
 

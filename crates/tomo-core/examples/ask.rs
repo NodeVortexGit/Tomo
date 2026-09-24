@@ -1,7 +1,9 @@
 //! Ask Tomo's brain one thing from the terminal, without the app — handy for
-//! checking the API key, the model and tools like look_at_screen:
+//! checking that a local model (Ollama or LM Studio) answers, and tools like
+//! look_at_screen:
 //!
 //!     cargo run -p tomo-core --example ask -- "what's on my screen?"
+//!     cargo run -p tomo-core --example ask -- --speak "say hi"   (and hear it)
 //!
 //! Commands are never run from here (the executor is log-only) and nothing is
 //! saved to Tomo's memory.
@@ -13,15 +15,22 @@ use tomo_core::ai::AiClient;
 use tomo_core::apps::SystemCatalog;
 use tomo_core::commands::Executor;
 use tomo_core::db::Db;
+use tomo_core::speech::Speech;
 use tomo_core::Config;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tomo_core::init_tracing();
-    let question = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
-    anyhow::ensure!(!question.is_empty(), "usage: ask <question>");
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let speak = args.first().is_some_and(|a| a == "--speak");
+    if speak {
+        args.remove(0);
+    }
+    let question = args.join(" ");
+    anyhow::ensure!(!question.is_empty(), "usage: ask [--speak] <question>");
 
     let cfg = Config::load(&std::env::current_dir()?)?;
+    let speech = Speech::new(&cfg);
     let executor = Executor::new(false, std::env::temp_dir().join("tomo-ask-audit.log"), vec![]);
     let ai = AiClient::new(
         cfg,
@@ -37,5 +46,9 @@ async fn main() -> anyhow::Result<()> {
         println!("[body] {event:?}");
     }
     println!("{reply}");
+    if speak {
+        let audio = speech.synthesize(&reply).await?;
+        speech.play(&audio).await?;
+    }
     Ok(())
 }

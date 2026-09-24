@@ -35,8 +35,6 @@ use crate::events::{BrainToUi, ChatLine, Role, UiToBrain};
 use crate::speech::{resolve_python, Speech};
 use crate::wake::{self, Wake};
 
-/// How many seconds of microphone audio one voice-input press captures.
-const VOICE_SECONDS: u32 = 5;
 /// How often to re-scan the OS for newly installed/removed apps + toggles.
 const RESCAN_INTERVAL: Duration = Duration::from_secs(120);
 
@@ -144,32 +142,16 @@ async fn run_loop(
                 let speech = voice.then_some(&speech);
                 handle_user_text(&db, &ai, speech, wake.as_ref(), &ui, text).await;
             }
-            UiToBrain::StartVoiceInput => {
-                // Push-to-talk through the offline listener when it runs.
-                if let Some(wake) = &wake {
-                    wake.listen();
-                    continue;
+            UiToBrain::StartVoiceInput => match &wake {
+                // Push-to-talk through the offline listener.
+                Some(wake) => wake.listen(),
+                None => {
+                    let _ = ui.send(BrainToUi::Chat(ChatLine::new(
+                        Role::System,
+                        "Voice input isn't set up: the speech models are missing (the installer downloads them).",
+                    )));
                 }
-                if !speech.can_listen() {
-                    let _ = ui.send(BrainToUi::Status(
-                        "voice input needs GOOGLE_STT_API_KEY in .env".into(),
-                    ));
-                    continue;
-                }
-                let _ = ui.send(BrainToUi::Status("listening…".into()));
-                match speech.listen(VOICE_SECONDS).await {
-                    Ok(text) if !text.trim().is_empty() => {
-                        let speech = voice.then_some(&speech);
-                        handle_user_text(&db, &ai, speech, None, &ui, text).await;
-                    }
-                    Ok(_) => {
-                        let _ = ui.send(BrainToUi::Status("didn't catch that".into()));
-                    }
-                    Err(e) => {
-                        let _ = ui.send(BrainToUi::Status(format!("mic error: {e}")));
-                    }
-                }
-            }
+            },
             UiToBrain::ImportCharacter { path, name } => {
                 match characters::activate(&db, &cfg, &path, &name) {
                     Ok(path) => {

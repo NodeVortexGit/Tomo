@@ -1,13 +1,13 @@
 //! Desktop-session detection.
 //!
-//! Tomo has to behave on a spread of environments — KDE, XFCE, Cinnamon,
-//! GNOME, Hyprland and i3, over both Wayland and X11. The *windowing tricks*
-//! needed for a floating desktop character (transparency, always-on-top,
-//! click-through, skip-taskbar) are requested through winit the same way
-//! everywhere, but how well each is honoured depends on the compositor. This
-//! module figures out where we're running so [`crate::window`] can pick the
-//! best strategy and log a clear note when a compositor is known to need a
-//! workaround.
+//! Tomo has to behave on a spread of environments — Windows, and on Linux
+//! KDE, XFCE, Cinnamon, GNOME, Hyprland and i3, over both Wayland and X11.
+//! The *windowing tricks* needed for a floating desktop character
+//! (transparency, always-on-top, click-through, skip-taskbar) are requested
+//! through winit the same way everywhere, but how well each is honoured
+//! depends on the compositor. This module figures out where we're running so
+//! [`crate::window`] can pick the best strategy and log a clear note when a
+//! compositor is known to need a workaround.
 //!
 //! This is ordinary environment sniffing — no graphics — so it is fully
 //! working and unit-tested.
@@ -18,6 +18,8 @@ use std::fmt;
 pub enum DisplayServer {
     Wayland,
     X11,
+    Windows,
+    MacOs,
     Unknown,
 }
 
@@ -44,11 +46,17 @@ pub struct Session {
 impl Session {
     /// Detect from the current process environment.
     pub fn detect() -> Self {
-        let server = detect_server(
-            std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
-            std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
-            std::env::var("DISPLAY").ok().as_deref(),
-        );
+        let server = if cfg!(windows) {
+            DisplayServer::Windows
+        } else if cfg!(target_os = "macos") {
+            DisplayServer::MacOs
+        } else {
+            detect_server(
+                std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+                std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+                std::env::var("DISPLAY").ok().as_deref(),
+            )
+        };
         let raw_desktop = std::env::var("XDG_CURRENT_DESKTOP")
             .or_else(|_| std::env::var("DESKTOP_SESSION"))
             .unwrap_or_default();
@@ -62,6 +70,9 @@ impl Session {
 
     /// A one-line human summary for the log.
     pub fn describe(&self) -> String {
+        if matches!(self.server, DisplayServer::Windows | DisplayServer::MacOs) {
+            return self.server.to_string();
+        }
         match self.desktop {
             Desktop::Other if !self.raw_desktop.is_empty() => {
                 format!("{} ({}) on {}", self.desktop, self.raw_desktop, self.server)
@@ -119,6 +130,8 @@ impl fmt::Display for DisplayServer {
         let s = match self {
             DisplayServer::Wayland => "Wayland",
             DisplayServer::X11 => "X11",
+            DisplayServer::Windows => "Windows",
+            DisplayServer::MacOs => "macOS",
             DisplayServer::Unknown => "unknown display server",
         };
         f.write_str(s)

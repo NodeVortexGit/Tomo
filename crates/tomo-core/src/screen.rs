@@ -1,11 +1,13 @@
 //! Seeing the screen: screenshots the model can look at.
 //!
 //! The AI asks for one through its `look_at_screen` tool (ai.rs). Capture
-//! shells out to whichever screenshot tool the desktop has — `grim` on
-//! wlroots compositors (Hyprland, Sway), `spectacle` on KDE,
-//! `gnome-screenshot` on GNOME, `maim` / `scrot` / ImageMagick `import` on X11
-//! — then fits the image for the model: at most [`MAX_EDGE`] px on its long
-//! edge (1080p-class, the sweet spot between detail and image tokens), as JPEG.
+//! uses what the system has: on Windows, the .NET screen copy through
+//! PowerShell; on macOS, `screencapture`; on Linux, whichever screenshot tool
+//! the desktop has — `grim` on wlroots compositors (Hyprland, Sway),
+//! `spectacle` on KDE, `gnome-screenshot` on GNOME, `maim` / `scrot` /
+//! ImageMagick `import` on X11. Then it fits the image for the model: at most
+//! [`MAX_EDGE`] px on its long edge (1080p-class, the sweet spot between
+//! detail and the model's time), as JPEG.
 
 use std::io::Cursor;
 use std::process::Stdio;
@@ -15,6 +17,8 @@ use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::{ImageFormat, ImageReader};
 use tokio::process::Command;
+
+use crate::platform;
 
 /// Longest edge sent to the model, px.
 const MAX_EDGE: u32 = 1920;
@@ -39,6 +43,19 @@ pub async fn capture() -> Result<Screenshot> {
 async fn grab() -> Result<Vec<u8>> {
     let file = std::env::temp_dir().join(format!("tomo-screen-{}.png", std::process::id()));
     let path = file.to_string_lossy().to_string();
+    if cfg!(windows) || cfg!(target_os = "macos") {
+        let status = if cfg!(windows) {
+            platform::shell(&windows_capture(&path)).stdin(Stdio::null()).status().await?
+        } else {
+            Command::new("screencapture").args(["-x", "-t", "png", &path]).status().await?
+        };
+        let image = tokio::fs::read(&file).await.unwrap_or_default();
+        let _ = tokio::fs::remove_file(&file).await;
+        if !status.success() || image.is_empty() {
+            return Err(anyhow!("couldn't take a screenshot"));
+        }
+        return Ok(image);
+    }
     // (program, arguments, whether it writes the image to stdout or to `file`)
     let tools: [(&str, Vec<&str>, bool); 6] = [
         ("grim", vec!["-t", "jpeg", "-q", "80", "-"], true),
@@ -77,6 +94,23 @@ async fn grab() -> Result<Vec<u8>> {
     Err(anyhow!(
         "no screenshot tool worked (install grim on Wayland, or maim or scrot on X11)"
     ))
+}
+
+/// PowerShell that copies every screen into a PNG at `path`, in real pixels
+/// (as a DPI-aware process, so a scaled display isn't shrunk).
+fn windows_capture(path: &str) -> String {
+    let path = path.replace('\'', "''");
+    format!(
+        "Add-Type -AssemblyName System.Windows.Forms, System.Drawing; \
+         Add-Type -TypeDefinition 'using System.Runtime.InteropServices; public static class Dpi {{ \
+         [DllImport(\"user32.dll\")] public static extern bool SetProcessDPIAware(); }}'; \
+         [Dpi]::SetProcessDPIAware() | Out-Null; \
+         $b = [System.Windows.Forms.SystemInformation]::VirtualScreen; \
+         $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height; \
+         $g = [System.Drawing.Graphics]::FromImage($bmp); \
+         $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size); \
+         $bmp.Save('{path}', [System.Drawing.Imaging.ImageFormat]::Png)"
+    )
 }
 
 /// Scale to at most [`MAX_EDGE`] and encode as JPEG. A JPEG that already fits

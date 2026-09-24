@@ -5254,6 +5254,7 @@ dependencies = [
  "tomo-core",
  "tracing",
  "wayland-backend",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

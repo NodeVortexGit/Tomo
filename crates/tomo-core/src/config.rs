@@ -1,9 +1,9 @@
 //! Configuration loading.
 //!
-//! Everything secret (API keys) and everything the user is likely to tweak
-//! lives in a `.env` file, exactly as the brief asked. This module reads that
-//! file plus a few XDG paths and hands back a validated [`Config`] that the
-//! rest of the program can rely on.
+//! Everything the user is likely to tweak lives in a `.env` file. This module
+//! reads that file plus the platform's usual folders (XDG on Linux, AppData on
+//! Windows) and hands back a validated [`Config`] that the rest of the
+//! program can rely on.
 //!
 //! Precedence, highest first:
 //!   1. real process environment variables
@@ -18,30 +18,57 @@ use serde::{Deserialize, Serialize};
 
 /// The persona name the assistant answers to by default.
 pub const DEFAULT_PERSONA: &str = "Tomo";
+/// The Piper voice used unless `TOMO_TTS_VOICE` picks another.
+pub const DEFAULT_VOICE: &str = "en_US-lessac-medium";
+/// Enough for the persona, the tools and a recent stretch of conversation.
+const DEFAULT_CONTEXT: u32 = 8192;
+
+/// Which local model server thinks for Tomo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LlmProvider {
+    /// Ollama if it's running, else LM Studio.
+    Auto,
+    /// Ollama (its own API, which also sets the context size).
+    Ollama,
+    /// LM Studio's local server.
+    LmStudio,
+    /// Any other server with an OpenAI-compatible API, at `llm_url`.
+    OpenAiCompatible,
+}
+
+impl LlmProvider {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().replace([' ', '-', '_'], "").as_str() {
+            "auto" | "" => Some(Self::Auto),
+            "ollama" => Some(Self::Ollama),
+            "lmstudio" => Some(Self::LmStudio),
+            "openai" | "openaicompatible" => Some(Self::OpenAiCompatible),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    // ---- Claude (Anthropic Messages API) ------------------------------------
-    /// Secret. Never logged. Read from `ANTHROPIC_API_KEY`.
-    pub api_key: String,
-    /// API root, `https://api.anthropic.com` unless you go through a gateway.
-    pub base_url: String,
-    /// e.g. `claude-sonnet-5`.
-    pub model: String,
-    /// How much the model thinks before answering: `low` (quick replies, the
-    /// default for a chatty companion), `medium`, `high`, `xhigh` or `max`.
-    pub effort: String,
+    // ---- The model: a local server (Ollama or LM Studio) ------------------
+    pub llm_provider: LlmProvider,
+    /// The server's address; empty for the provider's usual one on this
+    /// machine (Ollama: http://127.0.0.1:11434, LM Studio:
+    /// http://127.0.0.1:1234/v1).
+    pub llm_url: String,
+    /// The model to use; empty for the first local chat model the server has.
+    pub llm_model: String,
+    /// Only for a server that asks for one. Never logged.
+    pub llm_api_key: String,
+    /// How much conversation the model reads at once, in tokens (Ollama).
+    pub llm_context: u32,
 
-    // ---- Speech -----------------------------------------------------------
-    /// Edge-TTS voice id, e.g. `en-US-AriaNeural`.
-    pub edge_tts_voice: String,
-    /// Speaking rate for Edge-TTS, e.g. `+0%`, `-10%`.
-    pub edge_tts_rate: String,
-    /// Google Cloud Speech-to-Text API key (simple API-key mode). Optional:
-    /// if empty, STT is disabled and the mic button is greyed out.
-    pub google_stt_api_key: String,
-    /// BCP-47 language for STT, e.g. `en-US`.
-    pub stt_language: String,
+    // ---- Speech (all on this machine) --------------------------------------
+    /// Piper voice, e.g. `en_US-lessac-medium` (see `python -m
+    /// piper.download_voices`).
+    pub tts_voice: String,
+    /// Speaking speed: 1.0 normal, 1.2 a fifth faster.
+    pub tts_speed: f32,
 
     // ---- Character / persona ---------------------------------------------
     /// Friendly name shown in the chat header and used in the system prompt.
@@ -56,8 +83,10 @@ pub struct Config {
     pub db_path: PathBuf,
     /// Append-only audit log of every command the AI runs.
     pub audit_log_path: PathBuf,
-    /// Directory that holds the two Python speech helpers + their venv.
+    /// Directory that holds the Python speech helpers + their venv.
     pub scripts_dir: PathBuf,
+    /// The bundled assets (`<install>/assets`): characters that ship with Tomo.
+    pub assets_dir: PathBuf,
 
     // ---- Behaviour switches ----------------------------------------------
     /// Master safety switch. When false the executor refuses everything and
@@ -99,9 +128,7 @@ impl Config {
             None => {}
         }
 
-        let dirs = ProjectDirs::from("dev", "tomo", "tomo")
-            .context("could not determine a home directory for config")?;
-        let data_dir = env_path("TOMO_DATA_DIR").unwrap_or_else(|| dirs.data_dir().to_path_buf());
+        let data_dir = default_data_dir().context("could not determine a home directory for config")?;
         std::fs::create_dir_all(&data_dir)
             .with_context(|| format!("creating data dir {}", data_dir.display()))?;
 
@@ -111,25 +138,27 @@ impl Config {
         let character_path = env_path("TOMO_CHARACTER")
             .unwrap_or_else(|| data_dir.join("characters").join("default.vrm"));
 
+        let llm_provider = match env_str("TOMO_LLM") {
+            Some(value) => LlmProvider::parse(&value).unwrap_or_else(|| {
+                tracing::warn!("TOMO_LLM={value:?} isn't one of auto, ollama, lmstudio, openai; using auto");
+                LlmProvider::Auto
+            }),
+            None => LlmProvider::Auto,
+        };
         let cfg = Config {
-            // The OPENAI_* names are still read: Tomo used Anthropic's
-            // OpenAI-compatible endpoint before moving to the Messages API.
-            api_key: env_str("ANTHROPIC_API_KEY")
-                .or_else(|| env_str("OPENAI_API_KEY"))
-                .unwrap_or_default(),
-            base_url: env_str("ANTHROPIC_BASE_URL")
-                .or_else(|| env_str("OPENAI_BASE_URL"))
-                .unwrap_or_else(|| "https://api.anthropic.com".to_string()),
-            model: env_str("ANTHROPIC_MODEL")
-                .or_else(|| env_str("OPENAI_MODEL"))
-                .unwrap_or_else(|| "claude-sonnet-5".to_string()),
-            effort: env_str("TOMO_EFFORT").unwrap_or_else(|| "low".to_string()),
+            llm_provider,
+            llm_url: env_str("TOMO_LLM_URL").unwrap_or_default(),
+            llm_model: env_str("TOMO_LLM_MODEL").unwrap_or_default(),
+            llm_api_key: env_str("TOMO_LLM_API_KEY").unwrap_or_default(),
+            llm_context: env_str("TOMO_LLM_CONTEXT")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_CONTEXT),
 
-            edge_tts_voice: env_str("EDGE_TTS_VOICE")
-                .unwrap_or_else(|| "en-US-AriaNeural".to_string()),
-            edge_tts_rate: env_str("EDGE_TTS_RATE").unwrap_or_else(|| "+0%".to_string()),
-            google_stt_api_key: env_str("GOOGLE_STT_API_KEY").unwrap_or_default(),
-            stt_language: env_str("STT_LANGUAGE").unwrap_or_else(|| "en-US".to_string()),
+            tts_voice: env_str("TOMO_TTS_VOICE").unwrap_or_else(|| DEFAULT_VOICE.to_string()),
+            tts_speed: env_str("TOMO_TTS_SPEED")
+                .and_then(|v| v.parse().ok())
+                .filter(|s: &f32| *s > 0.1 && *s < 5.0)
+                .unwrap_or(1.0),
 
             persona_name: env_str("TOMO_PERSONA").unwrap_or_else(|| DEFAULT_PERSONA.to_string()),
             character_path,
@@ -138,6 +167,7 @@ impl Config {
             audit_log_path: data_dir.join("command-audit.log"),
             data_dir,
             scripts_dir,
+            assets_dir: project_root.join("assets"),
 
             allow_command_execution: env_bool("TOMO_ALLOW_COMMANDS").unwrap_or(true),
             extra_allowed_commands: env_str("TOMO_EXTRA_ALLOWED")
@@ -162,20 +192,20 @@ impl Config {
         let data_dir = root.join("data");
         std::fs::create_dir_all(&data_dir).expect("test data dir");
         Config {
-            api_key: String::new(),
-            base_url: "https://api.anthropic.com".into(),
-            model: "claude-sonnet-5".into(),
-            effort: "low".into(),
-            edge_tts_voice: "en-US-AriaNeural".into(),
-            edge_tts_rate: "+0%".into(),
-            google_stt_api_key: String::new(),
-            stt_language: "en-US".into(),
+            llm_provider: LlmProvider::Auto,
+            llm_url: String::new(),
+            llm_model: String::new(),
+            llm_api_key: String::new(),
+            llm_context: DEFAULT_CONTEXT,
+            tts_voice: DEFAULT_VOICE.into(),
+            tts_speed: 1.0,
             persona_name: DEFAULT_PERSONA.into(),
             character_path: data_dir.join("characters").join("default.vrm"),
             db_path: data_dir.join("memory.sqlite3"),
             audit_log_path: data_dir.join("command-audit.log"),
             data_dir,
             scripts_dir: root.join("scripts"),
+            assets_dir: root.join("assets"),
             allow_command_execution: false,
             extra_allowed_commands: Vec::new(),
             allow_screen: false,
@@ -183,30 +213,26 @@ impl Config {
         }
     }
 
-    /// True when we have enough to talk to the model.
-    pub fn ai_ready(&self) -> bool {
-        !self.api_key.is_empty()
-    }
-
-    /// True when speech-to-text is configured.
-    pub fn stt_ready(&self) -> bool {
-        !self.google_stt_api_key.is_empty()
-    }
-
     /// A redacted view safe to print in logs.
     pub fn redacted(&self) -> String {
+        let or_auto = |s: &str| if s.is_empty() { "auto".to_string() } else { s.to_string() };
         format!(
-            "Config {{ model: {}, effort: {}, base_url: {}, voice: {}, persona: {}, ai_ready: {}, stt_ready: {}, data_dir: {} }}",
-            self.model,
-            self.effort,
-            self.base_url,
-            self.edge_tts_voice,
+            "Config {{ llm: {:?} (url: {}, model: {}), voice: {}, persona: {}, wake_word: {}, data_dir: {} }}",
+            self.llm_provider,
+            or_auto(&self.llm_url),
+            or_auto(&self.llm_model),
+            self.tts_voice,
             self.persona_name,
-            self.ai_ready(),
-            self.stt_ready(),
+            self.wake_word,
             self.data_dir.display(),
         )
     }
+}
+
+/// Tomo's data folder: TOMO_DATA_DIR, else the platform's usual place —
+/// `~/.local/share/tomo` on Linux, `%APPDATA%\\tomo\\tomo\\data` on Windows.
+pub fn default_data_dir() -> Option<PathBuf> {
+    env_path("TOMO_DATA_DIR").or_else(|| Some(ProjectDirs::from("dev", "tomo", "tomo")?.data_dir().to_path_buf()))
 }
 
 fn env_str(key: &str) -> Option<String> {
