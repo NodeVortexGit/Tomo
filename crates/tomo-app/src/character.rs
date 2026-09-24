@@ -5,8 +5,8 @@
 //! extensions. Bevy's own glTF loader, lent the `.vrm` extension, loads the
 //! meshes, skins and textures; the VRM parts are read from the same JSON by
 //! the modules that use them — the humanoid rig and expressions by
-//! animation.rs, the spring bones by springs.rs. (MToon, VRM's toon shading,
-//! isn't implemented: the model is lit with glTF's standard materials.)
+//! animation.rs, the spring bones by springs.rs, the toon shading by
+//! mtoon.rs.
 
 use std::path::PathBuf;
 
@@ -20,6 +20,7 @@ use bevy::render::renderer::RenderDevice;
 
 use crate::animation::{gltf_json, Animator, VrmSpec};
 use crate::bridge::LoadCharacterEvent;
+use crate::mtoon::MToonSpec;
 use crate::springs::SpringSpec;
 
 /// Half the body's width as a share of its height (for the grab box).
@@ -165,10 +166,11 @@ fn spawn_vrm(commands: &mut Commands, asset_server: &AssetServer, path: &std::pa
             // all query `&Locomotion, With<Character>`; without it the
             // character would never move.
             crate::movement::Locomotion::default(),
-            // The humanoid rig, expressions and spring bones, read from the
-            // file itself.
+            // The humanoid rig, expressions, spring bones and toon shading,
+            // read from the file itself.
             VrmSpec::from_gltf(&gltf).unwrap_or_default(),
             SpringSpec::from_gltf(&gltf),
+            MToonSpec::from_gltf(&gltf, path),
             Animator::default(),
             SceneRoot(scene),
             Transform::default(),
@@ -183,7 +185,7 @@ fn spawn_vrm(commands: &mut Commands, asset_server: &AssetServer, path: &std::pa
 /// Measure the model once its meshes exist (a frame after the scene spawns,
 /// when their bounds are computed), then reveal it — so it's never shown at
 /// the wrong size.
-fn measure_character(
+pub(crate) fn measure_character(
     mut characters: Query<(Entity, &mut Character, &GlobalTransform, &mut Visibility)>,
     children: Query<&Children>,
     meshes: Query<(&Aabb, &GlobalTransform)>,

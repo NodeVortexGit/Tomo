@@ -64,7 +64,7 @@ impl SystemCatalog {
     /// Scan the OS: parse all `.desktop` entries and probe for toggles.
     pub fn scan() -> Self {
         let mut apps = parse_all_entries(&application_dirs());
-        apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        apps.sort_by_cached_key(|a| a.name.to_lowercase());
         SystemCatalog {
             apps,
             toggles: probe_toggles(),

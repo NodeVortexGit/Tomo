@@ -13,6 +13,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -116,22 +117,25 @@ impl Plugin for BridgePlugin {
     }
 }
 
+/// Everything the brain can make happen, as Bevy events.
+#[derive(SystemParam)]
+struct BrainEvents<'w> {
+    walk: EventWriter<'w, WalkToEvent>,
+    emote: EventWriter<'w, EmoteEvent>,
+    animate: EventWriter<'w, AnimateEvent>,
+    load: EventWriter<'w, LoadCharacterEvent>,
+    offered: EventWriter<'w, CharactersEvent>,
+    chat: EventWriter<'w, ChatAppendEvent>,
+    thinking: EventWriter<'w, ThinkingEvent>,
+    listening: EventWriter<'w, ListeningEvent>,
+    speaking: EventWriter<'w, SpeakingEvent>,
+    click: EventWriter<'w, ClickAtEvent>,
+    type_text: EventWriter<'w, TypeTextEvent>,
+    control: EventWriter<'w, ControlModeEvent>,
+}
+
 /// Drain the brain→UI channel each frame and fan out to typed Bevy events.
-fn pump_from_brain(
-    bridge: Res<Bridge>,
-    mut walk: EventWriter<WalkToEvent>,
-    mut emote: EventWriter<EmoteEvent>,
-    mut animate: EventWriter<AnimateEvent>,
-    mut load: EventWriter<LoadCharacterEvent>,
-    mut offered: EventWriter<CharactersEvent>,
-    mut chat: EventWriter<ChatAppendEvent>,
-    mut thinking: EventWriter<ThinkingEvent>,
-    mut listening: EventWriter<ListeningEvent>,
-    mut speaking: EventWriter<SpeakingEvent>,
-    mut click: EventWriter<ClickAtEvent>,
-    mut type_text: EventWriter<TypeTextEvent>,
-    mut control: EventWriter<ControlModeEvent>,
-) {
+fn pump_from_brain(bridge: Res<Bridge>, mut events: BrainEvents) {
     let mut rx = match bridge.from_brain.lock() {
         Ok(rx) => rx,
         Err(_) => return,
@@ -139,40 +143,40 @@ fn pump_from_brain(
     loop {
         match rx.try_recv() {
             Ok(BrainToUi::WalkTo(x)) => {
-                walk.send(WalkToEvent(x));
+                events.walk.send(WalkToEvent(x));
             }
             Ok(BrainToUi::Emote(e)) => {
-                emote.send(EmoteEvent(e));
+                events.emote.send(EmoteEvent(e));
             }
             Ok(BrainToUi::Animate(a)) => {
-                animate.send(AnimateEvent(a));
+                events.animate.send(AnimateEvent(a));
             }
             Ok(BrainToUi::LoadCharacter(p)) => {
-                load.send(LoadCharacterEvent(p));
+                events.load.send(LoadCharacterEvent(p));
             }
             Ok(BrainToUi::Characters(list)) => {
-                offered.send(CharactersEvent(list));
+                events.offered.send(CharactersEvent(list));
             }
             Ok(BrainToUi::Chat(line)) => {
-                chat.send(ChatAppendEvent(line));
+                events.chat.send(ChatAppendEvent(line));
             }
             Ok(BrainToUi::Thinking(t)) => {
-                thinking.send(ThinkingEvent(t));
+                events.thinking.send(ThinkingEvent(t));
             }
             Ok(BrainToUi::Listening(on)) => {
-                listening.send(ListeningEvent(on));
+                events.listening.send(ListeningEvent(on));
             }
             Ok(BrainToUi::Speaking(on)) => {
-                speaking.send(SpeakingEvent(on));
+                events.speaking.send(SpeakingEvent(on));
             }
             Ok(BrainToUi::ClickAt { x, y, double }) => {
-                click.send(ClickAtEvent { x, y, double });
+                events.click.send(ClickAtEvent { x, y, double });
             }
             Ok(BrainToUi::TypeText(t)) => {
-                type_text.send(TypeTextEvent(t));
+                events.type_text.send(TypeTextEvent(t));
             }
             Ok(BrainToUi::ControlMode(on)) => {
-                control.send(ControlModeEvent(on));
+                events.control.send(ControlModeEvent(on));
             }
             Ok(BrainToUi::Speak(_text)) => {
                 // TTS is performed inside the brain; nothing to do UI-side.

@@ -85,7 +85,7 @@ impl Overlay {
     /// the caller then falls back to a regular window.
     pub fn connect() -> Option<Self> {
         let conn = Connection::connect_to_env().ok()?;
-        let (globals, queue) = registry_queue_init::<State>(&conn).ok()?;
+        let (globals, mut queue) = registry_queue_init::<State>(&conn).ok()?;
         let qh = queue.handle();
         let Ok(layer_shell) = LayerShell::bind(&globals, &qh) else {
             info!("this compositor has no layer-shell; using a regular window");
@@ -94,13 +94,47 @@ impl Overlay {
         let compositor = CompositorState::bind(&globals, &qh).ok()?;
         let shm = Shm::bind(&globals, &qh).ok()?;
         let event_loop = EventLoop::<State>::try_new().ok()?;
-        WaylandSource::new(conn.clone(), queue)
+
+        let new_layer = |output: Option<&wl_output::WlOutput>| {
+            let surface = compositor.create_surface(&qh);
+            layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("tomo"), output)
+        };
+        let mut state = State {
+            registry: RegistryState::new(&globals),
+            seats: SeatState::new(&globals, &qh),
+            outputs: OutputState::new(&globals, &qh),
+            loop_handle: event_loop.handle(),
+            conn: conn.clone(),
+            compositor: compositor.clone(),
+            shm,
+            // The compositor picks the monitor (usually the focused one)…
+            layer: new_layer(None),
+            pointer: None,
+            keyboard: None,
+            size: None,
+            closed: false,
+            inputs: Vec::new(),
+            applied: InputRegion::default(),
+        };
+        // …unless TOMO_OUTPUT names one (e.g. "DP-1"). Outputs announce their
+        // names once asked, hence the round trips.
+        if let Ok(wanted) = std::env::var("TOMO_OUTPUT") {
+            queue.roundtrip(&mut state).ok()?;
+            queue.roundtrip(&mut state).ok()?;
+            let named = state
+                .outputs
+                .outputs()
+                .find(|output| state.outputs.info(output).and_then(|info| info.name).as_deref() == Some(wanted.as_str()));
+            match named {
+                Some(output) => state.layer = new_layer(Some(&output)),
+                None => warn!("no monitor called {wanted:?}; letting the compositor pick"),
+            }
+        }
+        WaylandSource::new(conn, queue)
             .insert(event_loop.handle())
             .ok()?;
 
-        let surface = compositor.create_surface(&qh);
-        let layer =
-            layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("tomo"), None);
+        let layer = &state.layer;
         // Cover the whole output. An exclusive zone of 0 keeps panels' space
         // free, so the floor is the top of a bottom bar, not hidden behind it.
         layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
@@ -111,23 +145,6 @@ impl Overlay {
         layer.wl_surface().set_input_region(Some(empty.wl_region()));
         // The first commit carries no buffer; it asks for a configure (size).
         layer.commit();
-
-        let state = State {
-            registry: RegistryState::new(&globals),
-            seats: SeatState::new(&globals, &qh),
-            outputs: OutputState::new(&globals, &qh),
-            loop_handle: event_loop.handle(),
-            conn,
-            compositor,
-            shm,
-            layer,
-            pointer: None,
-            keyboard: None,
-            size: None,
-            closed: false,
-            inputs: Vec::new(),
-            applied: InputRegion::default(),
-        };
         Some(Overlay { event_loop, state })
     }
 

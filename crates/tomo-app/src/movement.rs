@@ -1221,9 +1221,9 @@ mod tests {
     fn left_alone_it_never_leaves_the_floor() {
         // Idle life — strolling, sitting, napping, getting up — for two
         // minutes, whatever the dice say.
-        for seed in 1..40 {
+        for seed in 1..40u32 {
             let mut loco = standing(960.0);
-            loco.rng = seed * 0x9E37_79B9 | 1;
+            loco.rng = seed.wrapping_mul(0x9E37_79B9) | 1;
             for frame in 0..7200 {
                 loco.step(DT, ARENA, BODY);
                 loco.wander(DT);

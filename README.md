@@ -34,6 +34,9 @@ app that renders and moves the character).
 - 💇 **Spring bones**: hair streams behind her when she's thrown and falls
   the other way when she hangs upside down; skirts and ribbons sway with her
   (the model's own `VRMC_springBone` setup, colliders included).
+- 🎨 **MToon toon shading**, as the model was made to look: shade colours,
+  toon-sharp light and shadow, rim light, matcap, glowing hair highlights and
+  outlines (`VRMC_materials_mtoon`).
 - 🧠 **Claude-powered decisions** via tool use (Anthropic Messages API):
   speech, movement, emotion, memory, and command execution are all model
   choices.
@@ -89,6 +92,7 @@ tomo/
 │           ├── movement.rs   #  physics: body, limbs, drag & throw (tested)
 │           ├── animation.rs  #  poses the VRM rig from the physics; face
 │           ├── springs.rs    #  VRM spring bones: hair, skirt (tested)
+│           ├── mtoon.rs      #  VRM's MToon toon shading (+ mtoon.wgsl)
 │           ├── chat.rs       #  click→walk→liquid→chat sequence (egui)
 │           ├── input.rs      #  watchable clicks/typing (feature-gated)
 │           └── bridge.rs     #  pumps brain⇄Bevy over channels
@@ -145,8 +149,8 @@ Installer options: `TOMO_SKIP_SYSDEPS=1`, `TOMO_NO_BUILD=1`, `TOMO_PREFIX=...`.
 Everything lives in `.env` (see `.env.example` for the annotated list). Keys:
 `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `ANTHROPIC_BASE_URL`, `TOMO_EFFORT`,
 `EDGE_TTS_VOICE`, `EDGE_TTS_RATE`, `TOMO_WAKE_WORD`, `GOOGLE_STT_API_KEY`,
-`STT_LANGUAGE`, `TOMO_PERSONA`, `TOMO_CHARACTER`, `TOMO_ALLOW_COMMANDS`,
-`TOMO_ALLOW_SCREEN`.
+`STT_LANGUAGE`, `TOMO_PERSONA`, `TOMO_CHARACTER`, `TOMO_OUTPUT` (which
+monitor), `TOMO_ALLOW_COMMANDS`, `TOMO_ALLOW_SCREEN`.
 
 **Tomo uses Claude Sonnet 5** through Anthropic's Messages API, at low effort
 by default so replies come quickly (`TOMO_EFFORT` raises it). Older `.env`
@@ -246,6 +250,10 @@ It's only offered while screen viewing is allowed (`TOMO_ALLOW_SCREEN`).
 - ✅ Procedural animation of the VRM 1.0 rig from the physics, plus blinking,
   emotions, gestures (wave / nod / shrug) and a mouth synced to the voice
 - ✅ VRM 1.0 spring bones (sphere and capsule colliders), hair in world space
+- ✅ MToon 1.0 shading: shade colour and texture, shading shift and toony,
+  ambient, matcap, parametric rim, emission, UV animation, render-queue order
+  for transparent parts, and outlines (world- or screen-sized, kept at least
+  about a pixel wide at desktop-pet size)
 - ✅ Characters: the models on offer, switching from the chat or by asking,
   importing a `.vrm` through the desktop's file dialog; remembered
 - ✅ Adaptive frame rate (full rate while anything moves, 24 fps at rest) and
@@ -262,8 +270,6 @@ It's only offered while screen viewing is allowed (`TOMO_ALLOW_SCREEN`).
 
 **Needs iteration on real hardware (marked with `TODO(...)` in code):**
 
-- 🔧 MToon, VRM's toon shading, isn't implemented: models are lit with
-  glTF's standard materials.
 - 🔧 `TODO(input-region)` — click-through for the regular-window fallback (X11,
   GNOME Wayland): winit only offers whole-window hit-test, so this needs an X11
   XShape input region or `wl_surface.set_input_region` on winit's surface. The
@@ -281,7 +287,7 @@ It's only offered while screen viewing is allowed (`TOMO_ALLOW_SCREEN`).
 
 ```bash
 cargo test -p tomo-core             # the brain
-cargo test --release -p tomo-app    # physics, spring bones, session detection
+cargo test --release -p tomo-app    # physics, spring bones, MToon, session detection
 ```
 
 ---

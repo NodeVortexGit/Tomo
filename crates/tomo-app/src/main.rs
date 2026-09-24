@@ -18,6 +18,7 @@ mod character;
 mod chat;
 mod input;
 mod movement;
+mod mtoon;
 mod overlay;
 mod session;
 mod springs;
@@ -43,6 +44,7 @@ use crate::character::CharacterPlugin;
 use crate::chat::ChatPlugin;
 use crate::input::InputPlugin;
 use crate::movement::MovementPlugin;
+use crate::mtoon::MToonPlugin;
 use crate::overlay::Overlay;
 use crate::session::{DisplayServer, Session};
 use crate::springs::SpringPlugin;
@@ -122,6 +124,7 @@ fn main() -> anyhow::Result<()> {
         .add_plugins((
             BridgePlugin,
             CharacterPlugin,
+            MToonPlugin,
             AnimationPlugin,
             MovementPlugin,
             SpringPlugin,
@@ -154,6 +157,9 @@ fn run_systems_in_line(app: &mut App) {
     }
 }
 
+/// See `setup_scene`: π over the default camera exposure.
+const KEY_LIGHT_LUX: f32 = std::f32::consts::PI * 1.2 * 831.8; // 2^9.7 = 831.8
+
 /// Each frame starts idle; whatever moves this frame marks it busy.
 fn reset_busy(mut busy: ResMut<Busy>) {
     busy.0 = false;
@@ -174,10 +180,12 @@ fn setup_scene(mut commands: Commands) {
         Transform::from_xyz(0.0, 0.0, 500.0),
     ));
 
-    // Soft three-quarter key light so the model isn't flat.
+    // A three-quarter key light, from the upper right. MToon (mtoon.rs)
+    // counts illuminance × exposure = π as full light, the lit side showing
+    // its colours as painted: with the camera's default exposure, ~3100 lux.
     commands.spawn((
         DirectionalLight {
-            illuminance: 8_000.0,
+            illuminance: KEY_LIGHT_LUX,
             shadows_enabled: false,
             ..default()
         },

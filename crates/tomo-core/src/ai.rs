@@ -19,7 +19,8 @@
 //!          reads the target's coordinates off the image for `click_at`
 //!        - `walk_to` / `express` / `animate` / `change_character` → emitted
 //!          to the UI as [`BrainToUi`] so the body reacts
-//!      then loops back to step 2 so the model can use the results.
+//!
+//!      Then it loops back to step 2 so the model can use the results.
 //!   4. When the model ends its turn, its text is the reply.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
