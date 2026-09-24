@@ -27,3 +27,4 @@ assets/characters/*.vrm
 # Windows installer build products (packaging/windows)
 packaging/windows/uv/
 packaging/windows/Output/
+dist/
