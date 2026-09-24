@@ -1,5 +1,7 @@
 # Tomo — an AI-driven VRM desktop companion for Linux
 
+📘 **Документация на български:** [docs/bg/README.md](docs/bg/README.md)
+
 Tomo is a Desktop-Mate-style companion: a VRoid Studio (`.vrm`) character that
 walks around on your Linux desktop, talks with you, and is driven end-to-end by
 an LLM. The AI decides what Tomo says, where it walks, how it emotes, what it
