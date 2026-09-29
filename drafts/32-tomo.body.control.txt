@@ -1,0 +1,44 @@
+МОДУЛ: tomo/body/control.py
+ЧАСТ: Тяло — истинската мишка и клавиатура
+НАКРАТКО: „Видимите“ кликвания и писане от името на модела, с червен знак
+и спешен клавиш.
+
+1. ЗА КАКВО СЛУЖИ
+Инструментите click_at и type_text (само ако потребителят е разрешил
+управлението): Tomo отива до мястото на екрана и кликва с истинската мишка
+или пише с истинската клавиатура. Всичко се вижда.
+
+2. КАК РАБОТИ
+  ClickAt → pending (x, y, двоен?), active = True; тя тръгва към колоната
+    (loco.walk_to) и не се разсейва (held). Когато спре (is_idle), update()
+    кликва и освобождава всичко.
+  TypeText → пише веднага.
+  Windows: SendInput — мишката с абсолютни координати върху виртуалния
+    екран (0..65535; пиксел 0,0 на екранната снимка е ъгълът на
+    виртуалния екран), клавиатурата с KEYEVENTF_UNICODE (всеки знак,
+    вкл. кирилица).
+  Linux: xdotool (X11) или ydotool (Wayland), ако има; иначе се записва в
+    журнала какво би било направено.
+  Червеният знак (draw_badge): „Tomo is controlling the desktop · press
+    Pause to stop“, докато active.
+  Спешният клавиш (panic): Pause или Ctrl+Alt+Esc → край на управлението
+    и PanicStop към мозъка. В Windows, докато Tomo управлява, клавишът
+    работи отвсякъде (panic_pressed_anywhere, GetAsyncKeyState); иначе —
+    когато прозорецът е на фокус.
+
+3. ОСНОВНИ ЕЛЕМЕНТИ
+  Control (active, pending; .receive, .update, .panic, .draw_badge)
+  click(x, y, double), type_text(text), panic_pressed_anywhere()
+
+4. ВРЪЗКИ
+Използва: ui, movement, events, platform, ctypes/SendInput, xdotool/ydotool.
+Използва се от: app.
+
+5. ТЕСТОВЕ
+tests/test_body.py — кликът чака, докато тя стигне мястото, и се
+изпълнява точно веднъж (истинският клик е подменен в теста); спешният
+клавиш освобождава всичко и праща PanicStop.
+
+6. ЗА ЕКИПА
+- Разрешението се пази в мозъка (control_allowed): без него моделът
+  получава „mouse/keyboard control is switched off“ и нищо не се случва.

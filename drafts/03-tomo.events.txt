@@ -1,0 +1,58 @@
+МОДУЛ: tomo/events.py
+ЧАСТ: Връзката мозък ⇄ тяло
+НАКРАТКО: Всички типове съобщения, които мозъкът и тялото си разменят.
+
+1. ЗА КАКВО СЛУЖИ
+Мозъкът и тялото работят в различни нишки и не споделят състояние. Този
+модул описва „езика“ между тях — малки неизменяеми dataclass обекти.
+
+2. КАК РАБОТИ
+Тялото праща UiToBrain през BrainHandle.send(); мозъкът праща BrainToUi през
+функция ui(...), която ги слага в опашка; тялото ги взима с poll() веднъж на
+кадър.
+
+3. СЪОБЩЕНИЯТА
+Общи:
+  Role (user / assistant / system), ChatLine (роля, текст, час в ms,
+  снимки), CharacterChoice (име, път до .vrm), now_ms().
+  Attachment(path, source, about) — изпратена снимка: копието на Tomo в
+  папката с данни, оригиналният файл ("" ако е поставена от клипборда) и
+  метаданните като текст за модела (виж 18-tomo.attachments).
+
+Тяло → мозък (UiToBrain):
+  UserMessage(text, images) — написано в чата и снимките към него
+                             (пътища; мозъкът прави Attachment)
+  StartVoiceInput()        — бутонът Talk
+  ImportCharacter(path, name) — избран или внесен персонаж
+  PanicStop()              — спешният клавиш: край на управлението
+  SetControlAllowed(on)    — разрешаване на мишката/клавиатурата
+  SetVoice(on)             — гласът в чата включен/изключен
+  Shutdown()               — изход
+
+Мозък → тяло (BrainToUi):
+  Chat(line)               — нов ред в чата (и репликата на потребителя!)
+  Emote(emotion)           — изражение на лицето
+  WalkTo(position)         — отиди до 0..1 от ширината на екрана
+  ClickAt(x, y, double)    — отиди и кликни (пиксели от ъгъла на екрана)
+  TypeText(text)           — напиши с клавиатурата
+  ControlMode(on)          — показва/скрива червения знак за управление
+  Animate(clip)            — wave, nod, shrug, sit, lie_down, jump, idle
+  Thinking(on), Listening(on), Speaking(on)
+  LoadCharacter(path)      — зареди този .vrm
+  Characters(choices)      — наличните персонажи за менюто
+  Status(text)             — служебна бележка (само в журнала)
+  HealthLock(on)           — заключване за серия упражнения / край
+  HealthProgress(progress) — упражнение, брой, подсказка за екрана
+  Pose(joints)             — ставите на потребителя в този кадър (или None)
+
+4. ВРЪЗКИ
+Използва се от: brain, ai, health, wake, body.app, body.chat,
+body.animation, body.control, body.workout, тестовете.
+
+5. ЗА ЕКИПА
+- Правило „един източник на истината“: тялото НЕ добавя репликата на
+  потребителя в чата. Праща UserMessage, а мозъкът я връща като Chat заедно
+  с отговора — така чатът, паметта и моделът винаги са в синхрон.
+- Ново съобщение: добавете dataclass тук, включете го в съответния съюз
+  (UiToBrain или BrainToUi) и го обработете в brain.py или body/app.py
+  (App.dispatch).

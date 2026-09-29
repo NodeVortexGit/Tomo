@@ -1,0 +1,57 @@
+МОДУЛ: tomo/body/window.py
+ЧАСТ: Тяло — прозорецът и средата
+НАКРАТКО: Прозорецът без рамка, винаги отгоре, прозрачен навсякъде освен
+около персонажа и чата (GLFW); плюс разпознаване на средата.
+
+1. ЗА КАКВО СЛУЖИ
+Tomo трябва да плава над работния плот, без да пречи: кликванията върху
+празните места стигат до прозорците отдолу.
+
+2. КАК РАБОТИ
+Прозорец с GLFW: OpenGL 3.3 core, без рамка, винаги отгоре (FLOATING),
+без размер за промяна, без фокус при показване, 4× MSAA, дълбочина 24 бита.
+  Windows: прозрачност чрез цветови ключ — стилът WS_EX_LAYERED и
+    SetLayeredWindowAttributes(LWA_COLORKEY) с черно: всеки чисто черен
+    пиксел (изчистеният фон) показва работния плот и пропуска кликванията.
+    Плюс WS_EX_TOOLWINDOW (без бутон в лентата на задачите и в Alt+Tab).
+    Прозорецът покрива работната площ (SPI_GETWORKAREA) — лентата на
+    задачите е подът.
+  Linux: прозрачен кадров буфер (нужен е композитор). Предпочита се X11
+    (XWayland под Wayland), където прозорецът може да се постави, да е
+    отгоре и да пропуска мишката; TOMO_GLFW_PLATFORM=wayland иска собствен
+    Wayland. На X11 всеки кадър set_mouse_wanted() включва MOUSE_PASSTHROUGH,
+    когато курсорът не е над персонажа или чата.
+  По време на серия cover(True) разпъва прозореца върху всички екрани
+  (виртуалния екран), а keep_in_front() веднъж в секунда го връща отгоре и
+  отпред (SetWindowPos TOPMOST + SetForegroundWindow).
+  Мащаб: scale() е мащабът на дисплея (1.5 при 150 %); logical_size() —
+  размерът в логически пиксели; to_logical() превръща позицията на
+  курсора; screen_to_logical() — пиксел от екранна снимка → прозореца.
+  finish_frame(busy): показва кадъра; в покой чака (wait_events_timeout),
+  така че кадрите са до 24 в секунда, но входът остава бърз.
+
+Разпознаване на средата (Session.detect): Windows/macOS или Linux
+X11/Wayland и работния плот (KDE, GNOME, XFCE, Cinnamon, Hyprland, i3,
+Sway) — за бележки в журнала.
+
+3. ОСНОВНИ ЕЛЕМЕНТИ
+  Window(session) — work_area, whole_desktop, scale, framebuffer,
+    logical_size, to_logical, cursor, screen_to_logical, set_mouse_wanted,
+    cover, keep_in_front, push_front, should_close, finish_frame, close
+  Session, DisplayServer, Desktop, detect_server, detect_desktop
+  IDLE_FPS = 24
+
+4. ВРЪЗКИ
+Използва: glfw, platform, ctypes (Windows).
+Използва се от: app.
+
+5. ТЕСТОВЕ
+tests/test_body.py — разпознаването на X11/Wayland и на работните плотове.
+Прозрачността е проверена с живо стартиране и снимка на екрана в Windows.
+
+6. ЗА ЕКИПА
+- Всичко, което Tomo рисува, трябва да е поне малко по-светло от чисто
+  черното (renderer.py го гарантира с u_floor), иначе в Windows ще е
+  „дупка“ към работния плот.
+- Процес, пуснат скрит (напр. от някои инструменти), може да скрие и
+  прозореца — пускайте с нормално показване (Start-Process).

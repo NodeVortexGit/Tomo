@@ -1,0 +1,31 @@
+МОДУЛ: scripts/setup_models.py
+ЧАСТ: Помощен скрипт — изтегляне на моделите
+НАКРАТКО: Изтегля еднократно моделите за реч и камера в папката с данни.
+
+1. ЗА КАКВО СЛУЖИ
+Подготвя всичко, което помощните процеси използват. Пускат го
+инсталаторите; може да се пусне и ръчно по всяко време (изтеглените
+модели се прескачат).
+
+2. КАКВО ИЗТЕГЛЯ
+  Vosk, малкият английски модел       → <данни>/models/vosk-model-small-en-us-0.15
+    (думата за събуждане)
+  Parakeet TDT 0.6B v3, int8 ONNX     → <данни>/models/parakeet-tdt-0.6b-v3
+    (реч в текст, английски и български; ~670 MB; CC-BY-4.0)
+  три гласа на Piper                   → <данни>/voices/<глас>.onnx
+    (TOMO_TTS_VOICE_MALE = en_GB-alan-medium, TOMO_TTS_VOICE_FEMALE =
+     en_GB-cori-medium, TOMO_TTS_VOICE_BG = bg_BG-dimitar-medium; ~63 MB всеки)
+  MediaPipe Pose Lite                  → <данни>/models/pose_landmarker_lite.task
+    (ставите, за здравната програма)
+<данни> е същата папка като на приложението, освен ако --data-dir или
+TOMO_DATA_DIR не казват друго. Общо около 1 GB. Интернет е нужен само
+докато тегли.
+
+3. УПОТРЕБА
+  python scripts/setup_models.py
+  python scripts/setup_models.py --data-dir D:\tomo-data --voice-female en_US-amy-medium
+  (също --voice-male и --voice-bg)
+
+4. ВРЪЗКИ
+Използва: urllib, onnx-asr (hub), piper-tts. Използва се от: инсталаторите
+(packaging/windows/setup.ps1 -Models, install.sh).

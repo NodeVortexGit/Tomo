@@ -1,0 +1,54 @@
+МОДУЛ: tomo/config.py
+ЧАСТ: Мозък — настройки
+НАКРАТКО: Събира всички настройки (от .env, средата и стойностите по
+подразбиране) в един обект Config.
+
+1. ЗА КАКВО СЛУЖИ
+Едно място за всички настройки: кой сървър и модел да се използва, гласовете,
+персонажът, папките, превключвателите за безопасност, паметта.
+
+2. КАК РАБОТИ
+Приоритет (от най-силния): истинските променливи на средата → файлът .env в
+папката на проекта (или текущата) → стойностите по подразбиране в кода.
+python-dotenv зарежда .env, без да презаписва вече зададени променливи.
+Относителен път в TOMO_CHARACTER се тълкува спрямо папката на проекта.
+
+3. ОСНОВНИ ЕЛЕМЕНТИ
+  LlmProvider      — auto / ollama / lmstudio / openai; parse() разбира и
+                     изписвания като "LM Studio" или "openai-compatible".
+  Config           — dataclass с всички полета:
+                       llm_provider, llm_url, llm_model, llm_api_key,
+                       llm_context (8192), llm_think (False),
+                       llm_keep_alive ("1h"),
+                       tts_voice_male ("en_GB-alan-medium"),
+                       tts_voice_female ("en_GB-cori-medium"),
+                       tts_voice_bg ("bg_BG-dimitar-medium"), tts_speed,
+                       persona_name, character_path,
+                       data_dir, audit_log_path, scripts_dir, assets_dir,
+                       allow_command_execution, extra_allowed_commands,
+                       allow_screen, wake_word, embeddings ("ngram").
+  Config.load(root)     — чете всичко.
+  Config.for_tests(root) — всичко в тестова папка, нищо от средата.
+  Config.redacted()     — текст за журнала (без API ключа).
+  Config.chroma_dir     — <данни>/chroma (паметта).
+  Config.legacy_sqlite  — <данни>/memory.sqlite3 (старата памет за пренасяне).
+  default_data_dir()    — TOMO_DATA_DIR, иначе %APPDATA%\tomo\tomo\data
+                          (Windows) или ~/.local/share/tomo (Linux).
+  env_str / env_path / env_bool / env_float — четене на променливи.
+
+4. ВРЪЗКИ
+Използва се от почти всички модули на мозъка и от __main__, ask.
+
+5. ТЕСТОВЕ
+Косвено — Config.for_tests() се използва в test_db, test_ai, test_basics.
+
+6. ЗА ЕКИПА
+- Нова настройка: добавете поле в Config, прочетете я в load(), опишете я в
+  .env.example и в README.md (раздел 5).
+- API ключът никога не се пише в журнала — използвайте redacted().
+- Моделът за мислене е ЕДИН (решение на собственика на проекта): qwen3.5:9b,
+  зададен в TOMO_LLM_MODEL в .env. Ако е празно — qwen3.5:9b, ако е изтеглен,
+  иначе първият локален (ai.pick_model).
+- Гласовете: TOMO_TTS_VOICE_MALE, TOMO_TTS_VOICE_FEMALE (английски, според
+  персонажа) и TOMO_TTS_VOICE_BG (български, за всички). Старата настройка
+  TOMO_TTS_VOICE вече не се чете.

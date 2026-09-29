@@ -1,0 +1,64 @@
+МОДУЛ: pyproject.toml, .env.example, install.sh, packaging/windows/,
+       .github/workflows/build.yml
+ЧАСТ: Инсталиране, пакети, настройки и CI
+НАКРАТКО: Как Tomo се инсталира на Windows и Linux, какви пакети ползва и
+как GitHub проверява и сглобява всичко.
+
+1. pyproject.toml — ПАКЕТИТЕ
+  Основни (мозък + тяло): httpx, python-dotenv, chromadb, numpy, pillow,
+    glfw, moderngl, imgui-bundle.
+  Допълнения:
+    speech — piper-tts, vosk, onnx-asr[cpu,hub], sounddevice (без Linux);
+    camera — opencv-python, mediapipe;
+    all    — speech + camera (това инсталират инсталаторите);
+    dev    — pytest.
+  Команди: tomo (с конзола) и tomo-desktop (без конзола) → tomo.__main__:main.
+  Шейдърът mtoon.glsl е включен като package data.
+  Инсталиране за разработка:
+    uv venv --python 3.12
+    uv pip install -r pyproject.toml --extra all --extra dev
+
+2. .env.example — ОБРАЗЕЦЪТ НА НАСТРОЙКИТЕ
+Всяка настройка с обяснение (виж 02-tomo.config и README.md, раздел 5).
+Инсталаторите го копират като .env, ако такъв още няма.
+
+3. WINDOWS — packaging/windows/
+  tomo.iss      — Inno Setup 6: инсталира за текущия потребител (без
+                  администраторски права) в %LOCALAPPDATA%\Programs\Tomo:
+                  кода (tomo/, scripts/), моделите на персонажите,
+                  pyproject.toml, README.md, LICENSE, .env и uv.exe.
+                  Преки пътища: Tomo (.venv\Scripts\pythonw.exe -m tomo),
+                  „Set up Tomo's voice and camera“, „Download a model for
+                  Tomo“, „Tomo settings“ (.env в Notepad); по избор на
+                  работния плот и при влизане. При деинсталиране се трият
+                  .venv и __pycache__, а .env остава.
+  setup.ps1     — създава .venv с uv (Python 3.12, изтегля се от uv) и
+                  инсталира пакетите (--extra all); с -Models изтегля и
+                  моделите (setup_models.py). Може да се пусне отново за
+                  поправка.
+  get-model.ps1 — изтегля модела на Tomo за Ollama (по подразбиране
+                  qwen3.5:9b, около 6,6 GB); без Ollama отваря страницата
+                  за изтегляне.
+
+4. LINUX — install.sh
+  .env от образеца → системни пакети (apt / dnf / pacman / zypper: Python,
+  OpenGL, звук, grim, zenity, xdotool, wl-clipboard и xclip — за
+  поставянето на снимки в чата) → .venv (uv или venv+pip) с всички
+  пакети → моделите → проверка за Ollama/LM Studio (предлага модел) →
+  запис в менюто с приложения (~/.local/share/applications/tomo.desktop).
+  Опции: TOMO_SKIP_SYSDEPS=1, TOMO_SKIP_MODELS=1, TOMO_MODEL=… (по
+  подразбиране qwen3.5:9b).
+
+5. CI — .github/workflows/build.yml
+  test      — на ubuntu-24.04 и windows-2022: uv, Python 3.12, основните
+              пакети + pytest (без тежките speech/camera), всички тестове.
+  installer — на Windows, след успешни тестове: изтегля uv.exe, сглобява
+              Tomo-Setup-<версия>.exe с Inno Setup (версията е от
+              pyproject.toml или от етикета v*), качва го като артефакт и
+              при етикет v* го прикача към издание (release).
+
+6. ЗА ЕКИПА
+- Нова зависимост: добавете я в pyproject.toml в правилната група; ако е
+  нужна на помощен скрипт — в speech или camera.
+- Нова версия: сменете version в pyproject.toml и tomo/__init__.py, после
+  етикет vX.Y.Z.

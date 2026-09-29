@@ -1,0 +1,49 @@
+МОДУЛ: tomo/speech.py
+ЧАСТ: Мозък — гласът на Tomo (изходяща реч)
+НАКРАТКО: Превръща отговорите в глас с Piper и ги възпроизвежда. Гласът
+зависи от езика на отговора и от персонажа.
+
+1. ЗА КАКВО СЛУЖИ
+Tomo говори. Гласът се избира с обикновено if/elif/else (voice_for):
+  if   отговорът е на български  → bg_BG-dimitar-medium (Dimitar)
+  elif персонажът е мъжки        → en_GB-alan-medium   (Alan)
+  else (женски или неизбран)     → en_GB-cori-medium   (Cori)
+Дали персонажът е мъжки или женски решава моделът (виж 14-tomo.characters
+и 05-tomo.ai: ensure_voice, set_voice); Speech го пита чрез функцията
+gender, която мозъкът му подава (characters.voice_of).
+
+2. КАК РАБОТИ
+Piper работи в помощния процес scripts/tts_piper.py, пуснат веднъж — още
+при стартиране (warm_up), за да не чака първият отговор: той зарежда трите
+гласа (TOMO_TTS_VOICE_FEMALE, TOMO_TTS_VOICE_MALE, TOMO_TTS_VOICE_BG) и за
+всеки ред JSON {"text", "out", "voice", "speed"}
+пише WAV файл и отговаря {"ok": true}. Възпроизвеждане: winsound в Windows;
+първият наличен от pw-play, paplay, aplay, mpv, ffplay в Linux; afplay в
+macOS. След края файлът
+се трие.
+speakable() подготвя текста за четене на глас: маха Markdown маркерите,
+връзките оставят само думите си, емоджитата отпадат, всеки ред от списък
+получава пауза (точка).
+
+3. ОСНОВНИ ЕЛЕМЕНТИ
+  Speech(cfg, python=None, gender=None)
+    .voice_for(text)     — if/elif/else-то по-горе
+    .warm_up()           — пуска помощния процес веднага (async)
+    .synthesize(text)    — WAV файл (async)
+    .play(path)          — изсвирва и изчаква края (async)
+    .first_failure_note()— какво да се каже на потребителя при първата грешка
+  speakable, link_words, is_emoji, play_wav
+
+4. ВРЪЗКИ
+Използва: platform (helper_python, quiet_flags), language, scripts/tts_piper.py.
+Използва се от: brain (отговорите), health (броенето на глас), ask (--speak).
+
+5. ТЕСТОВЕ
+tests/test_basics.py — Markdown, емоджита, връзки, списъци, изборът на глас
+(всички клонове: български, мъжки, женски, неизбран).
+
+6. ЗА ЕКИПА
+- ВАЖНО: собственикът на проекта е поискал речта да не се променя без
+  изричното му съгласие. Гласовете и изборът им по персонажа са добавени по
+  негова молба; разпознаването на речта (STT, wake.py) не е пипано.
+- Входящата реч („Hey Tomo“) е в wake.py.

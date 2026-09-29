@@ -1,0 +1,31 @@
+МОДУЛ: tomo/body/mathx.py
+ЧАСТ: Тяло — математика
+НАКРАТКО: Вектори, кватерниони и матрици за анимацията, физиката и
+скелета.
+
+1. ЗА КАКВО СЛУЖИ
+Общите математически помощници на тялото на едно място.
+
+2. КАК РАБОТИ
+  Кватернионите са (x, y, z, w) — редът на glTF. qmul(a, b) завърта първо
+  с b, после с a (като glam: a * b).
+  Единичните стойности са обикновени кортежи на Python — за няколко кости
+  собствената аритметика на Python е по-бърза от numpy.
+  Пакетните функции (*_batch) работят с numpy масиви за целия скелет.
+  Матриците са numpy, действат върху вектор-колони: M @ v.
+
+3. ОСНОВНИ ЕЛЕМЕНТИ
+  Vec2 — точка/посока на екрана (+, −, ×, dot, length, distance, lerp,
+         clamp_length_max)
+  Вектори 3D: add, sub, scale, dot, cross, length, normalize_or_zero, is_zero
+  Кватерниони: qmul, qconj, qnormalize, qrot, qaxis, rx, ry, rz (градуси),
+               qslerp, qarc (най-късото завъртане между два вектора),
+               qfrom_mat3, qfrom_axes, IDENTITY
+  Пакетни: quat_to_mat3_batch, compose_batch (T·R·S), mat3_to_quat_batch,
+           rotation_of, compose
+
+4. ВРЪЗКИ
+Използва се от: animation, movement, skeleton, springs, app, тестовете.
+
+5. ЗА ЕКИПА
+- Внимавайте с реда при qmul — повечето грешки в позите са от обърнат ред.

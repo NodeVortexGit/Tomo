@@ -1,0 +1,34 @@
+МОДУЛ: tomo/platform.py
+ЧАСТ: Мозък — разликите между системите
+НАКРАТКО: Коя обвивка изпълнява командите, как се търсят програми, как
+помощните процеси се пускат без конзолен прозорец.
+
+1. ЗА КАКВО СЛУЖИ
+Събира на едно място всичко, което се различава между Windows и Linux, за
+да не се пръскат проверки по кода.
+
+2. КАК РАБОТИ
+  shell_argv(line): Windows — powershell.exe -NoProfile -NonInteractive
+    -Command, като в началото на реда стои POWERSHELL_UTF8 (конзолата,
+    изходът и файловете в UTF-8 — иначе „ō“, „—“ и кирилицата стигат до
+    модела развалени); Linux — bash -lc.
+  quiet_flags(): CREATE_NO_WINDOW в Windows (помощните процеси не показват
+    конзола), 0 другаде.
+  which(program): търсене в PATH (с разширенията на Windows).
+  helper_python(): Python за помощните скриптове — същият, който изпълнява
+    Tomo (pythonw.exe се заменя с python.exe, защото помощниците говорят
+    през stdin/stdout).
+  os_name(), shell_name() — за модела и журнала.
+  WINDOWS, MACOS — булеви константи.
+
+3. ВРЪЗКИ
+Използва се от: commands, apps, volume, screen, speech, wake, health,
+body.chat, body.control, body.window, body.workout.
+
+4. ТЕСТОВЕ
+tests/test_basics.py — изпълнение в обвивката, UTF-8 изход с „ō“ и „—“,
+търсенето на програми.
+
+5. ЗА ЕКИПА
+- Всяка команда към PowerShell минава оттук — не пускайте powershell.exe
+  директно другаде, иначе UTF-8 поправката се губи.

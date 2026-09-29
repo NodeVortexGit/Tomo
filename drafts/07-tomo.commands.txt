@@ -1,0 +1,51 @@
+МОДУЛ: tomo/commands.py
+ЧАСТ: Мозък — защитено изпълнение на команди
+НАКРАТКО: Изпълнява командите на модела в PowerShell (Windows) или bash
+(Linux) — тихо, но с пълен одитен журнал и защити.
+
+1. ЗА КАКВО СЛУЖИ
+Tomo помага с компютъра чрез команди (звук, приложения, проверки).
+Изходът им не се показва в чата (потребителят гледа персонажа, не терминал),
+но НИЩО не се крие от собственика: всяка команда се записва.
+
+2. КАК РАБОТИ
+Защитата е на слоеве, в този ред:
+  1) главен превключвател (TOMO_ALLOW_COMMANDS) — изключен: нищо не се
+     изпълнява, само се записва REFUSED;
+  2) твърд черен списък (hard_denied, _windows_denied) — отказва се дори при
+     включен превключвател: rm -rf /, mkfs, dd върху диск, fork bomb,
+     curl|sh; format, Format-Volume, Clear-Disk, diskpart, bcdedit,
+     vssadmin delete shadows, изтриване на C:\ или системните папки,
+     reg delete HKLM\…, iwr … | iex и подобни;
+  3) ограничение от 20 s (COMMAND_TIMEOUT), изходът е до 16 KB;
+  4) одитен журнал command-audit.log — един ред на команда: час, RUN /
+     REFUSED / DENIED…, пълният текст (до 8000 знака).
+Командата се пуска през platform.shell_argv (PowerShell с UTF-8 настройки в
+началото на реда; bash -lc в Linux), без конзолен прозорец.
+
+CommandOutcome.summary() е това, което моделът чете:
+  - отказ: "REFUSED: … Nothing was done: tell the user it did not happen.";
+  - неуспех (exit ≠ 0): изходът плюс подкана да открие причината от грешката
+    и да опита поправка (така моделът сам отстранява проблеми);
+  - успех: exit=0 и изходът, или "(no output)".
+
+3. ОСНОВНИ ЕЛЕМЕНТИ
+  Executor(enabled, audit_log_path, extra_allowed)
+    .run(line) → CommandOutcome (никога не хвърля изключение)
+  CommandOutcome(allowed, exit_code, stdout, stderr, timed_out…) .summary()
+  hard_denied(command) → причина или None
+
+4. ВРЪЗКИ
+Използва: platform (обвивката), asyncio subprocess.
+Използва се от: ai (execute_command, open_app, set_volume, toggle_system),
+brain, ask.
+
+5. ТЕСТОВЕ
+tests/test_basics.py — опасните команди в Linux и Windows се отказват,
+нормалните минават, превключвателят, улавянето на изхода, подканата при
+грешка, дългите команди в журнала.
+
+6. ЗА ЕКИПА
+- Черният списък е последна защита, не единствена. Не го отслабвайте.
+- Думите в summary() са подбрани след тестове с истински модели — промяната
+  им променя поведението на модела.
