@@ -1,17 +1,18 @@
 ; Tomo — the Windows installer (Inno Setup 6).
 ;
-; Built by .github/workflows/build.yml after `cargo build --release`, with
-; uv.exe downloaded next to this file (uv\uv.exe):
+; Built by .github/workflows/build.yml, with uv.exe downloaded next to this
+; file (uv\uv.exe):
 ;
-;   ISCC.exe /DAppVersion=0.1.0 packaging\windows\tomo.iss
+;   ISCC.exe /DAppVersion=0.2.0 packaging\windows\tomo.iss
 ;
 ; It installs for the current user only (no admin needed) into
-; %LOCALAPPDATA%\Programs\Tomo, then optionally sets up the voice — a private
-; Python with Piper, Vosk and Whisper, and their models (setup-speech.ps1) —
-; and a model for Ollama (get-model.ps1). Everything runs on the computer.
+; %LOCALAPPDATA%\Programs\Tomo: Tomo's Python code, the helper scripts and the
+; characters. setup.ps1 then makes Tomo's own Python environment (.venv, with
+; uv) and, if chosen, downloads the speech and camera models; get-model.ps1
+; gets a model for Ollama. Everything runs on the computer.
 
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.2.0"
 #endif
 
 [Setup]
@@ -34,42 +35,47 @@ OutputBaseFilename=Tomo-Setup-{#AppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-UninstallDisplayIcon={app}\tomo.exe
 CloseApplications=yes
 
 [Tasks]
-Name: "speech"; Description: "Set up Tomo's voice and ""Hey Tomo"" (downloads Python and the speech models, about 1 GB, once)"
-Name: "model"; Description: "Download a model for Ollama to think with (qwen2.5:7b, about 4.7 GB; needs Ollama)"
+Name: "models"; Description: "Set up Tomo's voice, ""Hey Tomo"" and the health programme's camera (downloads the models, about 1 GB, once)"
+Name: "model"; Description: "Download the model Tomo thinks with, for Ollama (qwen3.5:9b, about 6.6 GB; needs Ollama)"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 Name: "autostart"; Description: "Start Tomo when I sign in"; Flags: unchecked
 
 [Files]
-Source: "..\..\target\release\tomo.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\tomo\*.py"; DestDir: "{app}\tomo"; Flags: ignoreversion
+Source: "..\..\tomo\body\*.py"; DestDir: "{app}\tomo\body"; Flags: ignoreversion
+Source: "..\..\tomo\body\*.glsl"; DestDir: "{app}\tomo\body"; Flags: ignoreversion
 Source: "..\..\scripts\*.py"; DestDir: "{app}\scripts"; Flags: ignoreversion
-Source: "..\..\scripts\requirements.txt"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "..\..\assets\characters\*.vrm"; DestDir: "{app}\assets\characters"; Flags: ignoreversion
+Source: "..\..\pyproject.toml"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 ; The settings: only on a first install, and kept when uninstalling.
 Source: "..\..\.env.example"; DestDir: "{app}"; DestName: ".env"; Flags: onlyifdoesntexist uninsneveruninstall
-Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "uv\uv.exe"; DestDir: "{app}\tools"; Flags: ignoreversion
-Source: "setup-speech.ps1"; DestDir: "{app}\tools"; Flags: ignoreversion
+Source: "setup.ps1"; DestDir: "{app}\tools"; Flags: ignoreversion
 Source: "get-model.ps1"; DestDir: "{app}\tools"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Tomo"; Filename: "{app}\tomo.exe"; WorkingDir: "{app}"
-Name: "{group}\Tomo (compatibility)"; Filename: "{app}\tomo.exe"; Parameters: "--renderer gl"; WorkingDir: "{app}"; Comment: "If Tomo's background shows black, try this"
-Name: "{group}\Set up Tomo's voice"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\setup-speech.ps1"""; WorkingDir: "{app}"
+Name: "{group}\Tomo"; Filename: "{app}\.venv\Scripts\pythonw.exe"; Parameters: "-m tomo"; WorkingDir: "{app}"
+Name: "{group}\Set up Tomo's voice and camera"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\setup.ps1"" -Models"; WorkingDir: "{app}"
 Name: "{group}\Download a model for Tomo"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\get-model.ps1"""; WorkingDir: "{app}"
 Name: "{group}\Tomo settings"; Filename: "notepad.exe"; Parameters: """{app}\.env"""
 Name: "{group}\Uninstall Tomo"; Filename: "{uninstallexe}"
-Name: "{userdesktop}\Tomo"; Filename: "{app}\tomo.exe"; WorkingDir: "{app}"; Tasks: desktopicon
-Name: "{userstartup}\Tomo"; Filename: "{app}\tomo.exe"; WorkingDir: "{app}"; Tasks: autostart
+Name: "{userdesktop}\Tomo"; Filename: "{app}\.venv\Scripts\pythonw.exe"; Parameters: "-m tomo"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{userstartup}\Tomo"; Filename: "{app}\.venv\Scripts\pythonw.exe"; Parameters: "-m tomo"; WorkingDir: "{app}"; Tasks: autostart
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\setup-speech.ps1"""; WorkingDir: "{app}"; StatusMsg: "Setting up Tomo's voice (this downloads about 1 GB)..."; Flags: waituntilterminated; Tasks: speech
+; Tomo's Python environment is always needed; the models only if chosen.
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\setup.ps1"""; WorkingDir: "{app}"; StatusMsg: "Setting up Tomo's Python (about 700 MB, once)..."; Flags: waituntilterminated; Tasks: not models
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\setup.ps1"" -Models"; WorkingDir: "{app}"; StatusMsg: "Setting up Tomo's Python, voice and camera (about 1.7 GB, once)..."; Flags: waituntilterminated; Tasks: models
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\get-model.ps1"""; WorkingDir: "{app}"; StatusMsg: "Getting a model for Ollama..."; Flags: waituntilterminated; Tasks: model
-Filename: "{app}\tomo.exe"; Description: "Start Tomo"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent
+Filename: "{app}\.venv\Scripts\pythonw.exe"; Parameters: "-m tomo"; Description: "Start Tomo"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent
 
 [UninstallDelete]
-Type: filesandordirs; Name: "{app}\scripts\.venv"
+Type: filesandordirs; Name: "{app}\.venv"
+Type: filesandordirs; Name: "{app}\tomo\__pycache__"
+Type: filesandordirs; Name: "{app}\tomo\body\__pycache__"
 Type: filesandordirs; Name: "{app}\scripts\__pycache__"

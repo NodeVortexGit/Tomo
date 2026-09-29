@@ -1,35 +1,32 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  Tomo — one-shot installer
+#  Tomo — the Linux installer
 #
-#  Installs everything Tomo needs and builds it. Tomo runs entirely on this
-#  computer: no cloud services, no API keys.
-#    • system libraries for Bevy (graphics/X11/Wayland/Vulkan) + audio I/O
-#    • the Rust toolchain (via rustup) if it's missing
-#    • a Python virtualenv with Piper (Tomo's voice) and Vosk + Whisper
-#      ("Hey Tomo" and the Talk button), plus their models
-#    • the release binary, a .env from the template, and a desktop entry
+#  Sets up everything Tomo needs. Tomo runs entirely on this computer: no
+#  cloud services, no API keys.
+#    • system packages: Python, OpenGL, audio tools, a screenshot tool, a file
+#      dialog, clipboard tools (to paste pictures into the chat), xdotool (for
+#      the mouse/keyboard control)
+#    • Tomo's Python environment (.venv, with uv if it's there, else venv+pip)
+#    • the speech and camera models (Piper voices, Vosk, Parakeet, Pose Lite)
+#    • a .env from the template, and an entry in the app menu
 #    • a check for a local model server (Ollama or LM Studio), offering to
 #      download a model for Ollama
 #
 #  (Windows has its own installer: Tomo-Setup-<version>.exe, built by the
 #  project's GitHub Actions from packaging/windows/.)
 #
-#  Supported package managers: apt, dnf, pacman, zypper (Debian/Ubuntu/Mint/Pop,
-#  Fedora/RHEL, Arch/Manjaro/EndeavourOS, openSUSE). Other distros: install the
-#  equivalents of the package list printed at the top and re-run with
-#  TOMO_SKIP_SYSDEPS=1.
+#  Package managers: apt, dnf, pacman, zypper. Other distributions: install
+#  the equivalents of the lists below and run with TOMO_SKIP_SYSDEPS=1.
 #
 #  Usage:   ./install.sh
-#  Options (env vars):
-#     TOMO_SKIP_SYSDEPS=1   don't touch system packages (you installed them)
-#     TOMO_NO_BUILD=1       set up deps + venv but skip `cargo build`
-#     TOMO_PREFIX=~/.local  where to install the binary (default ~/.local)
-#     TOMO_MODEL=qwen2.5:7b the Ollama model to offer (default qwen2.5:7b)
+#  Options (environment variables):
+#     TOMO_SKIP_SYSDEPS=1   don't touch system packages
+#     TOMO_SKIP_MODELS=1    don't download the speech and camera models
+#     TOMO_MODEL=qwen3.5:9b the Ollama model to offer
 # =============================================================================
 set -euo pipefail
 
-# ---- pretty output ----------------------------------------------------------
 c_reset='\033[0m'; c_bold='\033[1m'; c_grn='\033[32m'; c_yel='\033[33m'; c_red='\033[31m'; c_cya='\033[36m'
 say()  { printf "${c_cya}▸${c_reset} %s\n" "$*"; }
 ok()   { printf "${c_grn}✓${c_reset} %s\n" "$*"; }
@@ -37,116 +34,83 @@ warn() { printf "${c_yel}!${c_reset} %s\n" "$*"; }
 die()  { printf "${c_red}✗ %s${c_reset}\n" "$*" >&2; exit 1; }
 hr()   { printf "${c_bold}%s${c_reset}\n" "────────────────────────────────────────────────────────"; }
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PREFIX="${TOMO_PREFIX:-$HOME/.local}"
-BIN_DIR="$PREFIX/bin"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPS_DIR="$HOME/.local/share/applications"
-DATA_DIR="${TOMO_DATA_DIR:-$HOME/.local/share/tomo}"
-MODEL="${TOMO_MODEL:-qwen2.5:7b}"
+DATA_DIR="${TOMO_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/tomo}"
+MODEL="${TOMO_MODEL:-qwen3.5:9b}"
+VENV="$ROOT/.venv"
 
 hr
-printf "${c_bold}  Tomo installer${c_reset}  —  AI VRM desktop companion\n"
+printf "${c_bold}  Tomo installer${c_reset}  —  a local AI VRM desktop companion\n"
 hr
 
-# ---- 0. .env FIRST ----------------------------------------------------------
-# Done before anything that could fail, so you always end up with a .env to
-# edit even if a later step (packages, rustup, pip) errors out.
-if [ ! -f "$SCRIPT_DIR/.env" ]; then
-    cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
-    ok "Created .env from template → $SCRIPT_DIR/.env (the defaults work as they are)"
+# ---- 0. .env first: you always end up with settings to edit ---------------------
+if [ ! -f "$ROOT/.env" ]; then
+    cp "$ROOT/.env.example" "$ROOT/.env"
+    ok "Created .env from the template → $ROOT/.env (the defaults work as they are)"
 else
-    ok ".env already exists (left untouched)."
+    ok ".env already exists (left as it is)."
 fi
 
-# ---- 1. detect the package manager -----------------------------------------
+# ---- 1. system packages -------------------------------------------------------------------
 PM=""
 for candidate in apt-get dnf pacman zypper; do
     if command -v "$candidate" >/dev/null 2>&1; then PM="$candidate"; break; fi
 done
-[ -n "$PM" ] || warn "No supported package manager found; will skip system deps."
-[ -n "$PM" ] && say "Package manager: $PM"
 
-# ---- 2. system dependencies -------------------------------------------------
 install_sysdeps() {
-    [ -n "${TOMO_SKIP_SYSDEPS:-}" ] && { warn "Skipping system deps (TOMO_SKIP_SYSDEPS set)."; return; }
-    [ -n "$PM" ] || return
-
-    say "Installing system dependencies (may prompt for sudo)…"
+    [ -n "${TOMO_SKIP_SYSDEPS:-}" ] && { warn "Skipping system packages (TOMO_SKIP_SYSDEPS)."; return; }
+    [ -n "$PM" ] || { warn "No supported package manager: skipping system packages."; return; }
+    say "Installing system packages with $PM (may ask for sudo)…"
     case "$PM" in
       apt-get)
         sudo apt-get update -y
-        sudo apt-get install -y \
-          build-essential pkg-config curl clang \
-          libasound2-dev libudev-dev \
-          libx11-dev libxcursor-dev libxrandr-dev libxi-dev libxkbcommon-dev \
-          libwayland-dev \
-          libvulkan1 mesa-vulkan-drivers vulkan-tools \
-          python3 python3-venv python3-pip \
-          pulseaudio-utils alsa-utils grim zenity
-        ;;
+        sudo apt-get install -y python3 python3-venv python3-pip curl \
+          libgl1 libegl1 libglib2.0-0 \
+          pulseaudio-utils alsa-utils grim zenity xdotool wl-clipboard xclip ;;
       dnf)
-        sudo dnf install -y \
-          gcc gcc-c++ pkgconf-pkg-config curl clang \
-          alsa-lib-devel systemd-devel \
-          libX11-devel libXcursor-devel libXrandr-devel libXi-devel libxkbcommon-devel \
-          wayland-devel \
-          vulkan-loader mesa-vulkan-drivers vulkan-tools \
-          python3 python3-pip \
-          pulseaudio-utils alsa-utils grim zenity
-        ;;
+        sudo dnf install -y python3 python3-pip curl \
+          mesa-libGL mesa-libEGL glib2 \
+          pulseaudio-utils alsa-utils grim zenity xdotool wl-clipboard xclip ;;
       pacman)
-        sudo pacman -Sy --needed --noconfirm \
-          base-devel pkgconf curl clang \
-          alsa-lib systemd-libs \
-          libx11 libxcursor libxrandr libxi libxkbcommon \
-          wayland \
-          vulkan-icd-loader vulkan-tools \
-          python python-pip \
-          libpulse alsa-utils grim zenity
-        ;;
+        sudo pacman -Sy --needed --noconfirm python python-pip curl \
+          mesa glib2 \
+          libpulse alsa-utils grim zenity xdotool wl-clipboard xclip ;;
       zypper)
-        sudo zypper --non-interactive install -y \
-          gcc gcc-c++ pkg-config curl clang \
-          alsa-devel systemd-devel \
-          libX11-devel libXcursor-devel libXrandr-devel libXi-devel libxkbcommon-devel \
-          wayland-devel \
-          vulkan-loader vulkan-tools \
-          python3 python3-pip \
-          pulseaudio-utils alsa-utils grim zenity
-        ;;
+        sudo zypper --non-interactive install -y python3 python3-pip curl \
+          Mesa-libGL1 Mesa-libEGL1 glib2 \
+          pulseaudio-utils alsa-utils grim zenity xdotool wl-clipboard xclip ;;
     esac
-    ok "System dependencies installed."
+    ok "System packages installed."
 }
-install_sysdeps || warn "Some system packages failed to install — continuing anyway; if the build later complains about a missing library, install it from the list above and re-run."
+install_sysdeps || warn "Some system packages didn't install — carrying on; install them by hand if something is missing."
 
-# ---- 3. Rust toolchain ------------------------------------------------------
-if ! command -v cargo >/dev/null 2>&1; then
-    say "Rust not found — installing via rustup…"
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    # shellcheck disable=SC1091
-    source "$HOME/.cargo/env"
-fi
-command -v cargo >/dev/null 2>&1 || die "cargo still not on PATH; open a new shell and re-run."
-ok "Rust toolchain: $(cargo --version)"
-
-# ---- 4. Python venv + speech deps ------------------------------------------
-say "Setting up the Python virtualenv for speech (Piper, Vosk, Whisper)…"
-VENV="$SCRIPT_DIR/scripts/.venv"
-python3 -m venv "$VENV"
-# shellcheck disable=SC1091
-"$VENV/bin/pip" install --upgrade pip >/dev/null
-"$VENV/bin/pip" install -r "$SCRIPT_DIR/scripts/requirements.txt"
-ok "Speech venv ready at scripts/.venv"
-
-# ---- 5. speech models (they run on this computer) ---------------------------
-say "Downloading the speech models (Vosk, Whisper and Tomo's voice, ~250 MB)…"
-if TOMO_DATA_DIR="$DATA_DIR" "$VENV/bin/python" "$SCRIPT_DIR/scripts/setup_models.py"; then
-    ok "Speech models ready in $DATA_DIR"
+# ---- 2. Tomo's Python environment ---------------------------------------------------------
+say "Setting up Tomo's Python environment in .venv…"
+if command -v uv >/dev/null 2>&1; then
+    [ -x "$VENV/bin/python" ] || uv venv --python 3.12 "$VENV"
+    uv pip install --python "$VENV/bin/python" -r "$ROOT/pyproject.toml" --extra all
 else
-    warn "Some speech models didn't download; run scripts/setup_models.py again later."
+    command -v python3 >/dev/null 2>&1 || die "Python 3 is needed (3.11 or newer)."
+    [ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
+    "$VENV/bin/pip" install --upgrade pip >/dev/null
+    "$VENV/bin/pip" install "$ROOT[all]"
+fi
+ok "Python environment ready: $VENV"
+
+# ---- 3. the speech and camera models (they run on this computer) ------------------------
+if [ -n "${TOMO_SKIP_MODELS:-}" ]; then
+    warn "Skipping the models (TOMO_SKIP_MODELS); later: .venv/bin/python scripts/setup_models.py"
+else
+    say "Downloading the speech and camera models (about 1 GB, once)…"
+    if TOMO_DATA_DIR="$DATA_DIR" "$VENV/bin/python" "$ROOT/scripts/setup_models.py"; then
+        ok "Models ready in $DATA_DIR"
+    else
+        warn "Some models didn't download; run .venv/bin/python scripts/setup_models.py again later."
+    fi
 fi
 
-# ---- 5b. a local model to think with ---------------------------------------
+# ---- 4. a local model to think with ---------------------------------------------------------
 if command -v ollama >/dev/null 2>&1; then
     ok "Ollama found."
     if ! ollama list 2>/dev/null | awk 'NR > 1 && $3 != "-" { found = 1 } END { exit !found }'; then
@@ -168,46 +132,33 @@ else
     warn "or LM Studio (https://lmstudio.ai), then get a model: ollama pull $MODEL"
 fi
 
-# (.env was already created at step 0, before anything that could fail.)
-
-# ---- 6. build ---------------------------------------------------------------
-if [ -n "${TOMO_NO_BUILD:-}" ]; then
-    warn "Skipping build (TOMO_NO_BUILD set)."
-else
-    say "Building Tomo in release mode (first build downloads Bevy — grab a coffee)…"
-    ( cd "$SCRIPT_DIR" && cargo build --release )
-    ok "Build complete."
-
-    # ---- 7. install binary + desktop entry ---------------------------------
-    mkdir -p "$BIN_DIR" "$APPS_DIR" "$DATA_DIR/characters"
-    install -m 0755 "$SCRIPT_DIR/target/release/tomo" "$BIN_DIR/tomo"
-    ok "Installed binary → $BIN_DIR/tomo"
-
-    cat > "$APPS_DIR/tomo.desktop" <<EOF
+# ---- 5. the app menu -------------------------------------------------------------------------
+mkdir -p "$APPS_DIR" "$DATA_DIR/characters"
+cat > "$APPS_DIR/tomo.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Tomo
-Comment=AI-driven VRM desktop companion
-Exec=env TOMO_ROOT=$SCRIPT_DIR $BIN_DIR/tomo
+Comment=A local AI VRM desktop companion
+Exec=env TOMO_ROOT=$ROOT $VENV/bin/python -m tomo
+Path=$ROOT
 Terminal=false
 Categories=Utility;
-X-GNOME-Autostart-enabled=true
+StartupWMClass=tomo.desktop.companion
 EOF
-    ok "Installed desktop entry → $APPS_DIR/tomo.desktop"
-fi
+ok "App menu entry → $APPS_DIR/tomo.desktop"
 
-# ---- done -------------------------------------------------------------------
+# ---- done ------------------------------------------------------------------------------------
 hr
 ok "Tomo is set up."
 echo
-echo -e "${c_bold}Next steps:${c_reset}"
-echo "  1. Make sure Ollama (or LM Studio's server) is running with a model:"
+echo -e "${c_bold}Next:${c_reset}"
+echo "  1. Make sure Ollama (or LM Studio's server) runs with a model:"
 echo -e "        ${c_cya}ollama pull $MODEL${c_reset}"
-echo "  2. Optional: settings live in ${c_cya}$SCRIPT_DIR/.env${c_reset}; other characters"
-echo "     can go in ${c_cya}$DATA_DIR/characters/${c_reset} or be imported from the chat."
-echo "  3. Launch from your app menu (\"Tomo\"), or run:"
-echo -e "        ${c_cya}TOMO_ROOT=$SCRIPT_DIR $BIN_DIR/tomo${c_reset}"
+echo "  2. Settings are in $ROOT/.env; more characters can go in $DATA_DIR/characters/"
+echo "     or be imported from the chat."
+echo "  3. Start Tomo from the app menu, or:"
+echo -e "        ${c_cya}$VENV/bin/python -m tomo${c_reset}"
 echo
-echo "  Then just say \"Hey Tomo\" — or click her to chat."
-echo "  Tip: on GNOME Wayland, always-on-top is limited — see README.md."
+echo "  Then say \"Hey Tomo\" — or click her to chat."
+echo "  A compositor is needed for the see-through window (on X11: picom, kwin, mutter…)."
 hr

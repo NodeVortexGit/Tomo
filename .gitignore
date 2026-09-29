@@ -1,23 +1,26 @@
-# Rust
-/target
-**/*.rs.bk
-
-# Secrets — never commit your real keys
+# Your settings — never commit them
 .env
 
-# Python speech venv + caches
-scripts/.venv/
+# Python
+.venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
 
-# Runtime data (memory DB, audit log, cached audio, imported characters)
-# These normally live under ~/.local/share/tomo, but ignore any local copies:
+# Runtime data (memory, audit log, health schedule, logs). It normally lives
+# in the data folder (%APPDATA%\tomo\tomo\data or ~/.local/share/tomo), but
+# ignore any local copies:
+chroma/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
 command-audit.log
-last_tts.mp3
-mic.wav
+health.json
+tomo.lock
+tomo.log
 
 # Character models carry their own licences (see each .vrm's meta). Keep them
 # local unless the licence allows redistribution — then whitelist them here.
@@ -27,4 +30,3 @@ assets/characters/*.vrm
 # Windows installer build products (packaging/windows)
 packaging/windows/uv/
 packaging/windows/Output/
-dist/

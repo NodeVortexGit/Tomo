@@ -2,8 +2,13 @@
 """Download the speech models Tomo uses. They all run on this computer:
 
   Vosk, small English    spots "Hey Tomo"          <data>/models/vosk-model-small-en-us-0.15
-  Whisper, base.en       turns speech into text    <data>/models/whisper-base.en
-  a Piper voice          Tomo's own voice          <data>/voices/<voice>.onnx
+  Parakeet TDT 0.6B v3   turns speech into text,   <data>/models/parakeet-tdt-0.6b-v3
+                         English or Bulgarian
+  three Piper voices     Tomo's own voice: male    <data>/voices/<voice>.onnx
+                         and female English, and
+                         Bulgarian
+  MediaPipe Pose Lite    the joints, for the       <data>/models/pose_landmarker_lite.task
+                         health programme
 
 <data> is Tomo's data folder — the same one the app uses: ~/.local/share/tomo
 on Linux, %APPDATA%\\tomo\\tomo\\data on Windows — unless --data-dir or
@@ -21,8 +26,16 @@ from pathlib import Path
 
 VOSK = "vosk-model-small-en-us-0.15"
 VOSK_URL = f"https://alphacephei.com/vosk/models/{VOSK}.zip"
-WHISPER = "base.en"
-DEFAULT_VOICE = "en_US-lessac-medium"
+# NVIDIA's multilingual speech recogniser (25 European languages, Bulgarian
+# among them; CC-BY-4.0), as int8 ONNX: about 670 MB, fast on a CPU.
+STT = "parakeet-tdt-0.6b-v3"
+STT_REPO = "istupakov/parakeet-tdt-0.6b-v3-onnx"
+STT_FILES = ["config.json", "vocab.txt", "encoder-model.int8.onnx", "decoder_joint-model.int8.onnx"]
+POSE = "pose_landmarker_lite.task"
+POSE_URL = f"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/{POSE}"
+DEFAULT_VOICE_MALE = "en_GB-alan-medium"
+DEFAULT_VOICE_FEMALE = "en_GB-cori-medium"
+DEFAULT_VOICE_BG = "bg_BG-dimitar-medium"
 
 
 def data_dir():
@@ -48,20 +61,29 @@ def fetch_vosk(models):
         zipfile.ZipFile(io.BytesIO(response.read())).extractall(models)
 
 
-def fetch_whisper(models):
-    target = models / f"whisper-{WHISPER}"
-    if (target / "model.bin").exists():
-        return say(f"  Whisper is already there ({WHISPER})")
-    say(f"  Downloading Whisper ({WHISPER}, about 150 MB)…")
-    from faster_whisper import download_model
+def fetch_stt(models):
+    target = models / STT
+    if all((target / name).exists() for name in STT_FILES):
+        return say(f"  Parakeet is already there ({STT})")
+    say(f"  Downloading Parakeet ({STT}, about 670 MB)…")
+    from huggingface_hub import snapshot_download
 
-    download_model(WHISPER, output_dir=str(target))
+    snapshot_download(STT_REPO, local_dir=str(target), allow_patterns=STT_FILES)
+
+
+def fetch_pose(models):
+    target = models / POSE
+    if target.exists():
+        return say(f"  The pose model is already there ({POSE})")
+    say(f"  Downloading the pose model ({POSE}, about 6 MB)…")
+    with urllib.request.urlopen(POSE_URL) as response:
+        target.write_bytes(response.read())
 
 
 def fetch_voice(voices, voice):
     if (voices / f"{voice}.onnx").exists():
         return say(f"  The voice is already there ({voice})")
-    say(f"  Downloading Tomo's voice ({voice}, about 60 MB)…")
+    say(f"  Downloading a voice for Tomo ({voice}, about 60 MB)…")
     from piper.download_voices import download_voice
 
     voices.mkdir(parents=True, exist_ok=True)
@@ -71,14 +93,24 @@ def fetch_voice(voices, voice):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--data-dir", type=Path, default=None, help="Tomo's data folder")
-    parser.add_argument("--voice", default=os.environ.get("TOMO_TTS_VOICE") or DEFAULT_VOICE)
+    parser.add_argument("--voice-male", default=os.environ.get("TOMO_TTS_VOICE_MALE") or DEFAULT_VOICE_MALE)
+    parser.add_argument("--voice-female", default=os.environ.get("TOMO_TTS_VOICE_FEMALE") or DEFAULT_VOICE_FEMALE)
+    parser.add_argument("--voice-bg", default=os.environ.get("TOMO_TTS_VOICE_BG") or DEFAULT_VOICE_BG)
     args = parser.parse_args()
     data = args.data_dir or data_dir()
     models = data / "models"
     models.mkdir(parents=True, exist_ok=True)
     say(f"Speech models for Tomo, in {data}")
     failed = False
-    for step in (lambda: fetch_vosk(models), lambda: fetch_whisper(models), lambda: fetch_voice(data / "voices", args.voice)):
+    steps = (
+        lambda: fetch_vosk(models),
+        lambda: fetch_stt(models),
+        lambda: fetch_pose(models),
+        lambda: fetch_voice(data / "voices", args.voice_male),
+        lambda: fetch_voice(data / "voices", args.voice_female),
+        lambda: fetch_voice(data / "voices", args.voice_bg),
+    )
+    for step in steps:
         try:
             step()
         except Exception as error:

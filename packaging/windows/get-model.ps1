@@ -1,10 +1,11 @@
 # Tomo: download a model for Ollama to think with. It runs on this computer.
 #
 # Tomo works with Ollama or LM Studio. This fetches a model for Ollama —
-# qwen2.5:7b by default, which is good at the tool use Tomo relies on and fits
+# qwen3.5:9b by default: good at the tool use Tomo relies on, it sees images
+# (the ones you send, and the characters, to choose their voices) and fits
 # an 8 GB graphics card. Without Ollama it opens the download page instead.
 
-param([string]$Model = "qwen2.5:7b")
+param([string]$Model = "qwen3.5:9b")
 
 $ollama = (Get-Command ollama -ErrorAction SilentlyContinue).Source
 if (-not $ollama) {
