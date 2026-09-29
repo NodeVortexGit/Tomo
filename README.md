@@ -1,348 +1,240 @@
-# Tomo — a local AI VRM desktop companion for Linux and Windows
+# Tomo — локален AI VRM десктоп компаньон за Linux и Windows
 
-📘 **Документация на български:** [docs/bg/README.md](docs/bg/README.md)
+ 📘 **Документация на български:** docs/bg/README.md
 
-Tomo is a Desktop-Mate-style companion: a VRoid Studio (`.vrm`) character that
-walks around on your desktop, talks with you, and is driven end-to-end by a
-language model. The model decides what Tomo says, where it walks, how it
-emotes, what it remembers, and which commands it runs for you — quietly — in
-the background.
+ Tomo е компаньон в стил Desktop-Mate: персонаж от VRoid Studio (`.vrm`), който се разхожда по работния ви плот, разговаря с вас и се управлява изцяло от езиков модел. Моделът решава какво казва Tomo, къде се движи, как изразява емоциите си, какво запомня и кои команди изпълнява за вас — тихо — във фонов режим.
 
-**Everything runs on your computer.** The model is served by
-[Ollama](https://ollama.com) or [LM Studio](https://lmstudio.ai); Tomo's voice
-is [Piper](https://github.com/OHF-Voice/piper1-gpl); "Hey Tomo" and what you
-say are recognised by Vosk and Whisper. No cloud services, no API keys, and
-nothing you say or show her leaves the machine.
+ **Всичко работи на вашия компютър.** Моделът се предоставя от Ollama или LM Studio; гласът на Tomo е Piper; „Hey Tomo“ и това, което казвате, се разпознават от Vosk и Whisper. Няма облачни услуги, няма API ключове и нищо, което казвате или показвате, не напуска машината.
 
-Written in **Rust** (with a little **Python** for speech, **Bash** and
-**PowerShell** for installing), split into a "brain" (the model's tool use,
-memory, speech) and a "body" (the Bevy app that renders and moves the
-character).
+ Написан на **Rust** (с малко **Python** за речта, **Bash** и **PowerShell** за инсталиране), проектът е разделен на „мозък“ (използване на инструменти от модела, памет, реч) и „тяло“ (приложението Bevy, което визуализира и движи персонажа).
 
-> **Where it runs.** Linux — developed and tested on Arch Linux with Hyprland
-> (Wayland); other desktops are handled in code but untested — and Windows
-> 10/11, which is built and unit-tested on Windows by the project's CI but
-> still needs trying on real PCs: see
-> **[What's done vs. what needs work](#status)**.
+ > **Къде работи.** Linux — разработен и тестван на Arch Linux с Hyprland (Wayland); други десктоп среди са обработени в кода, но не са тествани — и Windows 10/11, който се компилира и подлага на unit тестове под Windows от CI на проекта, но все още трябва да бъде изпробван на реални компютри: вижте **Какво е готово и какво остава**.
 
 ---
 
-## What it does
+ ## Какво прави
 
-- 🧍 **VRM character** exported from VRoid Studio, floating above everything on
-  your desktop, with clicks passing straight through everywhere except on the
-  character (a layer-shell overlay on Hyprland/Sway/KDE; a transparent,
-  click-through window on Windows).
-- 🚶 **A small rigid-body physics engine** — she walks on the floor (on
-  Windows, the taskbar) and never levitates; pick her up by any point (by the
-  feet, she hangs upside down), swing her, throw her spinning all the way
-  round. Come down wrong and she falls over, lies there a moment, and gets back
-  up. She also sits down or takes a nap on her own now and then.
-- 🤸 **Animation driven by the physics**: limbs dangle and swing when she's
-  carried, float up in a fall, knees give on landing, she leans into a start;
-  plus breathing, a walk cycle, blinking, emotions, gestures and a talking
-  mouth, all from the model's own VRM rig.
-- 💇 **Spring bones**: hair streams behind her when she's thrown and falls
-  the other way when she hangs upside down; skirts and ribbons sway with her.
-- 🎨 **MToon toon shading**, as the model was made to look: shade colours,
-  toon-sharp light and shadow, rim light, matcap, glowing hair highlights and
-  outlines.
-- 🧠 **A local model decides**, through tool use: speech, movement, emotion,
-  memory and command execution are all its choices. Ollama or LM Studio, found
-  automatically.
-- 👀 **Sees your screen** when it helps ("what's this error?"), with a model
-  that can see images — the chat notes every look.
-- 🗣 **"Hey Tomo"** — a wake word recognised on the computer (Vosk), with
-  your request transcribed there too (Whisper). Or press Talk.
-- 🔊 **Her own voice**, Piper neural text-to-speech, on the computer.
-  Markdown and emoji are left out of the voice; the 🔊 toggle in the chat
-  mutes it.
-- 💬 **Liquid chat window**: click Tomo → she walks to the right → a liquid blob
-  grows out of her → the blob forms the chat window, with your recent
-  conversation in it.
-- 🗃 **Long-term memory** in SQLite — preferences and facts the model recalls
-  and reuses as context.
-- 🖥 **Silent device control**: the model runs commands for you (bash on
-  Linux, PowerShell on Windows); you never see a terminal — but every command
-  is written to an audit log.
-- 🎭 **Your own characters** — pick one from the chat's 👤 menu, import any
-  `.vrm` from there, or just ask Tomo to change into another one.
-- 📦 **Installers**: `install.sh` on Linux, `Tomo-Setup-<version>.exe` on
-  Windows.
+ - 🧍 **VRM персонаж**, експортиран от VRoid Studio, който стои над всичко останало на работния ви плот, като кликванията преминават директно през него навсякъде, освен върху самия персонаж (layer-shell overlay в Hyprland/Sway/KDE; прозрачен прозорец, пропускащ кликванията, в Windows).
+- 🚶 **Малък физичен двигател с твърди тела** — тя ходи по пода (в Windows — върху лентата на задачите) и никога не левитира; можете да я хванете за всяка точка (за краката — тогава увисва с главата надолу), да я размахвате и да я хвърляте, като се завърта във всички посоки. Ако падне неправилно, се просва, полежава за момент и се изправя. От време на време сама сяда или подремва.
+- 🤸 **Анимация, управлявана от физиката**: крайниците висят и се люлеят, когато я носите, повдигат се при падане, коленете се огъват при приземяване, а тя се накланя при потегляне; освен това има дишане, цикъл на ходене, мигане, емоции, жестове и говореща уста — всичко чрез собствения VRM rig на модела.
+- 💇 **Spring bones**: косата се развява зад нея, когато я хвърлите, и пада в обратната посока, когато виси с главата надолу; полите и панделките се поклащат.
+- 🎨 **MToon toon shading**, така както е създаден моделът: цветове на сенките, рязко разграничени светлина и сянка, rim light, matcap, светещи отблясъци в косата и контури.
+- 🧠 **Локален модел взема решения**, използвайки инструменти: речта, движението, емоциите, паметта и изпълнението на команди са негов избор. Ollama или LM Studio се откриват автоматично.
+- 👀 **Вижда екрана ви**, когато това е полезно („каква е тази грешка?“), чрез модел, който може да вижда изображения — чатът отбелязва всяко разглеждане.
+- 🗣 **„Hey Tomo“** — wake word, разпознаваща се на самия компютър (Vosk), като заявката ви също се транскрибира локално (Whisper). Или натиснете Talk.
+- 🔊 **Собствен глас**, чрез невронен text-to-speech на Piper, работещ на компютъра. Markdown и emoji се премахват от гласа; превключвателят 🔊 в чата го заглушава.
+- 💬 **„Течен“ чат прозорец**: кликвате върху Tomo → тя отива надясно → от нея се разраства течна форма → формата се превръща в прозорец за чат с последния ви разговор.
+- 🗃 **Дългосрочна памет** в SQLite — предпочитания и факти, които моделът си припомня и използва отново като контекст.
+- 🖥 **Тихо управление на устройството**: моделът изпълнява команди вместо вас (bash в Linux, PowerShell в Windows); никога не виждате терминал — но всяка команда се записва в audit log.
+- 🎭 **Ваши собствени персонажи** — изберете един от менюто 👤 в чата, импортирайте произволен `.vrm` оттам или просто помолете Tomo да се превърне в друг.
+- 📦 **Инсталатори**: `install.sh` за Linux, `Tomo-Setup-<version>.exe` за Windows.
 
 ---
 
-## Install
+ ## Инсталиране
 
-### What Tomo thinks with
+ ### С какво мисли Tomo
 
-Tomo needs a model server on the computer. Either:
+ Tomo се нуждае от сървър за модел на компютъра. Изберете едно от следните:
 
-- **[Ollama](https://ollama.com/download)**, then download a model:
-  `ollama pull qwen2.5:7b`. Tomo finds Ollama by itself.
-- **[LM Studio](https://lmstudio.ai)**: download a model there and start the
-  local server (Developer → Start Server). Tomo finds it too.
+ - **Ollama**, след което изтеглете модел:\
+   `ollama pull qwen2.5:7b`. Tomo открива Ollama автоматично.
+- **LM Studio**: изтеглете модел там и стартирайте локалния сървър (Developer → Start Server). Tomo го открива също.
 
-Which model: one good at **tool use**. With an 8 GB graphics card (e.g. an
-RTX 3070), `qwen2.5:7b` or `llama3.1:8b`; on smaller machines `qwen2.5:3b` or
-`llama3.2:3b` (smaller models make more mistakes). For Tomo to look at your
-screen, use one that also sees images, such as `qwen2.5vl:7b` or `gemma3`.
-Set `TOMO_LLM_MODEL` in `.env` to pick one; otherwise Tomo uses the first local
-model the server has.
+ Кой модел: изберете такъв, който е добър в **използването на инструменти**. С графична карта с 8 GB (например RTX 3070) използвайте `qwen2.5:7b` или `llama3.1:8b`; на по-малки машини — `qwen2.5:3b` или `llama3.2:3b` (по-малките модели допускат повече грешки). За да може Tomo да гледа екрана ви, използвайте модел, който вижда и изображения, например `qwen2.5vl:7b` или `gemma3`.
 
-### Windows
+ Задайте `TOMO_LLM_MODEL` в `.env`, за да изберете модел; в противен случай Tomo използва първия локален модел, който сървърът има.
 
-1. Install [Ollama](https://ollama.com/download) (or LM Studio).
-2. Run **`Tomo-Setup-<version>.exe`** — from the
-   [Releases](https://github.com/NodeVortexGit/Tomo/releases) page, or the
-   `Tomo-Setup-windows` artifact of the latest
-   [Build](https://github.com/NodeVortexGit/Tomo/actions) run. It installs for
-   your user only (no admin rights), and can:
-   - set up the voice and "Hey Tomo" — a private Python with Piper, Vosk and
-     Whisper, and their models (about 1 GB, downloaded once);
-   - download `qwen2.5:7b` for Ollama (about 4.7 GB).
-3. Start **Tomo** from the Start menu. Settings: Start menu → **Tomo settings**.
+ ### Windows
 
-If her background shows black instead of your desktop, start **Tomo
-(compatibility)** instead, which draws with OpenGL, or set `TOMO_RENDERER=gl`
-(or `dx12`) in the settings.
+ 1. Инсталирайте Ollama (или LM Studio).
+2. Стартирайте **`Tomo-Setup-<version>.exe`** — от страницата Releases или артефакта `Tomo-Setup-windows` от последното изпълнение на Build. Инсталира се само за вашия потребител (без администраторски права) и може да:
+   - настрои гласа и „Hey Tomo“ — отделна Python среда с Piper, Vosk и Whisper и техните модели (около 1 GB, изтегля се еднократно);
+   - изтегли `qwen2.5:7b` за Ollama (около 4,7 GB).
+3. Стартирайте **Tomo** от менюто Start. Настройки: Start menu → **Tomo settings**.
 
-### Linux
+ Ако фонът ѝ показва черно вместо работния ви плот, стартирайте **Tomo (compatibility)**, което използва OpenGL, или задайте `TOMO_RENDERER=gl` (или `dx12`) в настройките.
 
-```bash
+ ### Linux
+
+```
 git clone https://github.com/NodeVortexGit/Tomo.git tomo && cd tomo
 ./install.sh
 ```
 
-`install.sh` detects your package manager (apt / dnf / pacman / zypper),
-installs the Bevy graphics/audio system libraries, installs Rust via rustup if
-needed, creates the Python speech venv and downloads the speech models
-(~250 MB), builds the release binary, seeds `.env`, adds a desktop entry, and
-checks for Ollama or LM Studio — offering to download a model for Ollama.
-Then launch **Tomo** from your app menu. Launching it again while it runs does
-nothing: there's only ever one Tomo.
+ `install.sh` открива вашия пакетен мениджър (apt / dnf / pacman / zypper), инсталира системните библиотеки за графика/аудио на Bevy, инсталира Rust чрез rustup, ако е необходимо, създава Python speech venv и изтегля моделите за реч (\~250 MB), компилира release бинарния файл, създава началния `.env`, добавя desktop entry и проверява за Ollama или LM Studio — като предлага да изтегли модел за Ollama.
 
-Installer options: `TOMO_SKIP_SYSDEPS=1`, `TOMO_NO_BUILD=1`, `TOMO_PREFIX=...`,
-`TOMO_MODEL=...` (the Ollama model to offer).
+ След това стартирайте **Tomo** от менюто с приложения. Повторното стартиране, докато вече работи, не прави нищо: винаги има само една инстанция на Tomo.
 
-To check the model and the voice without starting the app:
+ Опции на инсталатора: `TOMO_SKIP_SYSDEPS=1`, `TOMO_NO_BUILD=1`, `TOMO_PREFIX=...`, `TOMO_MODEL=...` (моделът на Ollama, който да бъде предложен).
 
-```bash
+ За да проверите модела и гласа, без да стартирате приложението:
+
+```
 cargo run -p tomo-core --example ask -- --speak "say hi"
 ```
 
 ---
 
-## Configuration
+ ## Конфигурация
 
-Everything lives in `.env` (see [`.env.example`](.env.example) for the
-annotated list); the defaults work as they are.
+ Всичко се намира в `.env` (вижте `.env.example` за анотиран списък); настройките по подразбиране работят директно.
 
-| Key | Default | What |
-|---|---|---|
-| `TOMO_LLM` | `auto` | `auto` (Ollama, else LM Studio), `ollama`, `lmstudio`, or `openai` (any OpenAI-compatible server) |
-| `TOMO_LLM_URL` | the server's usual | e.g. `http://127.0.0.1:11434` or `http://127.0.0.1:1234/v1` |
-| `TOMO_LLM_MODEL` | first local model | e.g. `qwen2.5:7b` |
-| `TOMO_LLM_CONTEXT` | `8192` | how much the model reads at once, tokens (Ollama) |
-| `TOMO_LLM_API_KEY` | — | only if your server asks for one |
-| `TOMO_TTS_VOICE` | `en_US-lessac-medium` | any [Piper voice](https://rhasspy.github.io/piper-samples/) |
-| `TOMO_TTS_SPEED` | `1.0` | speaking speed |
-| `TOMO_WAKE_WORD` | `true` | listen for "Hey Tomo" (off: the mic is used only for Talk) |
-| `TOMO_WHISPER_DEVICE` | `cpu` | `cuda` for an NVIDIA card with CUDA 12 + cuDNN 9 |
-| `TOMO_PERSONA` | `Tomo` | her name |
-| `TOMO_CHARACTER` | the bundled one | a `.vrm` to show |
-| `TOMO_OUTPUT` | — | which monitor (Linux, Wayland) |
-| `TOMO_RENDERER` | best available | `vulkan`, `dx12` or `gl` |
-| `TOMO_ALLOW_COMMANDS` | `true` | the master switch for commands and control |
-| `TOMO_ALLOW_SCREEN` | `true` | may she look at the screen |
+ | Ключ | По подразбиране | Какво означава |
+| --- | --- | --- |
+| `TOMO_LLM` | `auto` | `auto` (Ollama, иначе LM Studio), `ollama`, `lmstudio` или `openai` (всеки OpenAI-съвместим сървър) |
+| `TOMO_LLM_URL` | стандартният адрес на сървъра | напр. `http://127.0.0.1:11434` или `http://127.0.0.1:1234/v1` |
+| `TOMO_LLM_MODEL` | първият локален модел | напр. `qwen2.5:7b` |
+| `TOMO_LLM_CONTEXT` | `8192` | колко от текста прочита моделът наведнъж, в токени (Ollama) |
+| `TOMO_LLM_API_KEY` | — | само ако сървърът ви изисква такъв |
+| `TOMO_TTS_VOICE` | `en_US-lessac-medium` | всеки Piper voice |
+| `TOMO_TTS_SPEED` | `1.0` | скорост на говорене |
+| `TOMO_WAKE_WORD` | `true` | слуша за „Hey Tomo“ (изключено: микрофонът се използва само за Talk) |
+| `TOMO_WHISPER_DEVICE` | `cpu` | `cuda` за NVIDIA карта с CUDA 12 \+ cuDNN 9 |
+| `TOMO_PERSONA` | `Tomo` | нейното име |
+| `TOMO_CHARACTER` | включеният по подразбиране | `.vrm` файлът, който да бъде показан |
+| `TOMO_OUTPUT` | — | кой монитор да се използва (Linux, Wayland) |
+| `TOMO_RENDERER` | най-достъпният | `vulkan`, `dx12` или `gl` |
+| `TOMO_ALLOW_COMMANDS` | `true` | главният превключвател за команди и управление |
+| `TOMO_ALLOW_SCREEN` | `true` | дали може да гледа екрана |
 
 ---
 
-## Architecture
+ ## Архитектура
 
-Two crates, split so the brain builds fast and is fully testable without a GPU:
+ Два crate-а, разделени така, че „мозъкът“ да се компилира бързо и да може да бъде напълно тестван без GPU:
 
 ```
 tomo/
-├── install.sh                # Linux installer (distro-aware)
-├── .env.example              # settings, with explanations
-├── packaging/windows/        # the Windows installer (Inno Setup) + its scripts
-├── .github/workflows/        # CI: tests on Linux and Windows, the installer
+├── install.sh                # Linux инсталатор (съобразен с дистрибуцията)
+├── .env.example              # настройки с обяснения
+├── packaging/windows/        # Windows инсталатор (Inno Setup) + скриптовете му
+├── .github/workflows/        # CI: тестове на Linux и Windows, инсталаторът
 ├── crates/
-│   ├── tomo-core/            # THE BRAIN — no graphics deps, unit-tested
+│   ├── tomo-core/            # МОЗЪКЪТ — без графични зависимости, unit тестове
 │   │   └── src/
-│   │       ├── config.rs     #  loads .env + the platform's folders
-│   │       ├── db.rs         #  SQLite memory (prefs, memories, chat, chars)
-│   │       ├── characters.rs #  the .vrm models on offer; switching
-│   │       ├── apps.rs       #  installed apps (+ Linux system toggles)
-│   │       ├── commands.rs   #  audited, deny-listed command executor
-│   │       ├── ai.rs         #  the local model's tool-use loop
-│   │       ├── screen.rs     #  screenshots for the model to look at
-│   │       ├── wake.rs       #  voice input: "Hey Tomo" and Talk
-│   │       ├── speech.rs     #  Tomo's voice (Piper)
-│   │       ├── platform.rs   #  what differs between Linux and Windows
-│   │       ├── events.rs     #  messages exchanged with the body
-│   │       └── brain.rs      #  async event loop + channels
-│   └── tomo-app/             # THE BODY — Bevy app
+│   │       ├── config.rs     #  зарежда .env + папките на платформата
+│   │       ├── db.rs         #  SQLite памет (предпочитания, спомени, чат, персонажи)
+│   │       ├── characters.rs #  наличните .vrm модели; превключване
+│   │       ├── apps.rs       #  инсталирани приложения (+ системни превключватели в Linux)
+│   │       ├── commands.rs   #  одитиран изпълнител на команди със забранен списък
+│   │       ├── ai.rs         #  цикъл за използване на инструменти от локалния модел
+│   │       ├── screen.rs     #  снимки на екрана за модела
+│   │       ├── wake.rs       #  гласов вход: „Hey Tomo“ и Talk
+│   │       ├── speech.rs     #  гласът на Tomo (Piper)
+│   │       ├── platform.rs   #  разликите между Linux и Windows
+│   │       ├── events.rs     #  съобщенията между мозъка и тялото
+│   │       └── brain.rs      #  асинхронен event loop + канали
+│   └── tomo-app/             # ТЯЛОТО — Bevy приложение
 │       └── src/
-│           ├── main.rs       #  wires the App together
-│           ├── session.rs    #  Windows / X11 / Wayland + desktop detection
-│           ├── overlay.rs    #  layer-shell overlay above everything (Wayland)
-│           ├── window.rs     #  the window elsewhere (Windows, X11, GNOME)
-│           ├── character.rs  #  VRM loading + measuring
-│           ├── movement.rs   #  physics: body, limbs, drag & throw (tested)
-│           ├── animation.rs  #  poses the VRM rig from the physics; face
-│           ├── springs.rs    #  VRM spring bones: hair, skirt (tested)
-│           ├── mtoon.rs      #  VRM's MToon toon shading (+ mtoon.wgsl)
-│           ├── chat.rs       #  click→walk→liquid→chat sequence (egui)
-│           ├── input.rs      #  watchable clicks/typing (feature-gated)
-│           └── bridge.rs     #  pumps brain⇄Bevy over channels
+│           ├── main.rs       #  свързва приложението
+│           ├── session.rs    #  Windows / X11 / Wayland + откриване на десктопа
+│           ├── overlay.rs    #  layer-shell overlay над всички прозорци (Wayland)
+│           ├── window.rs     #  прозорец навсякъде другаде (Windows, X11, GNOME)
+│           ├── character.rs  #  зареждане + измерване на VRM
+│           ├── movement.rs   #  физика: тяло, крайници, влачене и хвърляне (тествано)
+│           ├── animation.rs  #  позира VRM rig-а според физиката; лице
+│           ├── springs.rs    #  VRM spring bones: коса, пола (тествано)
+│           ├── mtoon.rs      #  MToon toon shading на VRM (+ mtoon.wgsl)
+│           ├── chat.rs       #  последователност клик→ходене→течност→чат (egui)
+│           ├── input.rs      #  наблюдаеми кликове/писане (feature-gated)
+│           └── bridge.rs     #  предава данни между brain⇄Bevy чрез канали
 └── scripts/
-    ├── tts_piper.py          # Tomo's voice: text → WAV (Piper)
-    ├── wake_word.py          # "Hey Tomo" + request → text (Vosk + Whisper)
-    ├── setup_models.py       # downloads the speech models
+    ├── tts_piper.py          # гласът на Tomo: текст → WAV (Piper)
+    ├── wake_word.py          # „Hey Tomo“ + заявка → текст (Vosk + Whisper)
+    ├── setup_models.py       # изтегля моделите за реч
     └── requirements.txt
 ```
 
-**Threading model.** The Bevy render loop owns the main thread. The brain runs
-on its own thread with a Tokio runtime. They only ever exchange the messages in
-`events.rs` over channels, so the render loop never waits on the model, the
-database or speech. The speech helpers are separate Python processes, started
-once and kept running.
+ **Модел на нишките.** Render loop-ът на Bevy притежава главната нишка. Мозъкът работи в собствена нишка с Tokio runtime. Те обменят само съобщенията от `events.rs` чрез канали, така че render loop-ът никога не чака модела, базата данни или речта. Помощните програми за реч са отделни Python процеси, стартирани веднъж и оставяни да работят.
 
 ```
-        UiToBrain (user typed / talk / import / shutdown)
+        UiToBrain (въведено от потребителя / talk / import / shutdown)
   ┌──────────────────────────────────────────────────────────┐
   │                                                            ▼
-BODY (Bevy, main thread) ◀───────── BrainToUi ───────── BRAIN (Tokio thread)
-  render, walk, chat UI     (chat, walk, emote,          model loop, DB,
-                             animate, thinking,           commands, speech
-                             load-character)
+ТЯЛО (Bevy, главна нишка) ◀───────── BrainToUi ───────── МОЗЪК (Tokio нишка)
+  визуализация, ходене,        (чат, ходене, емоция,       цикъл на модела, DB,
+  чат UI                       анимация, мислене,          команди, реч,
+                               зареждане на персонаж)      зареждане на персонаж
 ```
 
 ---
 
-## Privacy
+ ## Поверителност
 
-- **The model runs on your computer** (Ollama / LM Studio). Your messages,
-  what Tomo remembers about you and any screenshot she takes go only to it.
-- **Voice in and out stay on the computer**: Vosk, Whisper and Piper.
-- **Screenshots** are taken only while `TOMO_ALLOW_SCREEN` is on, and every
-  look is noted in the chat.
-- The only downloads are at install time (the speech models, a model for
-  Ollama) and a Piper voice the first time you pick a new one.
+ - **Моделът работи на вашия компютър** (Ollama / LM Studio). Съобщенията ви, това, което Tomo помни за вас, и всички снимки на екрана, които прави, отиват само към него.
+- **Гласът — входящ и изходящ — остава на компютъра**: Vosk, Whisper и Piper.
+- **Снимки на екрана** се правят само когато `TOMO_ALLOW_SCREEN` е включено и всяко разглеждане се отбелязва в чата.
+- Единствените изтегляния са по време на инсталацията (моделите за реч, модел за Ollama) и Piper voice при първия избор на нов глас.
 
 ---
 
-## Safety model for command execution
+ ## Модел за безопасност при изпълнение на команди
 
-The model may run commands silently. "Silent" here means *no terminal in your
-face* — **not** hidden from you, the machine's owner:
+ Моделът може да изпълнява команди тихо. „Тихо“ тук означава _без терминал пред очите ви_ — **не** означава скрито от вас, собственика на машината:
 
-- **Master switch** — `TOMO_ALLOW_COMMANDS=false` turns execution into
-  log-only (records what it *would* have run).
-- **Hard deny-list** — irreversible disasters are refused even when the switch
-  is on, and can't be re-enabled from `.env`: on Linux `rm -rf /`, `mkfs`,
-  `dd` to a block device, fork bombs, piping the internet into a shell; on
-  Windows formatting or wiping drives and partitions, `diskpart`, `bcdedit`,
-  deleting a whole drive or the Windows folder, deleting shadow copies, and
-  running a download straight away (`iwr … | iex`).
-- **Full audit log** — every command (run, refused, or errored) is appended to
-  `command-audit.log` in Tomo's data folder (`~/.local/share/tomo` on Linux,
-  `%APPDATA%\tomo\tomo\data` on Windows), with a timestamp.
-- **Timeout** — a hung command can't freeze the assistant.
+ - **Главен превключвател** — `TOMO_ALLOW_COMMANDS=false` превръща изпълнението в режим само за логване (записва какво _би_ изпълнил моделът).
+- **Твърд списък със забранени команди** — необратимите катастрофални действия се отказват дори когато превключвателят е включен и не могат да бъдат разрешени отново чрез `.env`: в Linux `rm -rf /`, `mkfs`, `dd` към block device, fork bomb-и, подаване на интернет съдържание директно към shell; в Windows форматиране или изтриване на дискове и дялове, `diskpart`, `bcdedit`, изтриване на цял диск или папката на Windows, изтриване на shadow copies и директно изпълнение на изтеглен код (`iwr … | iex`).
+- **Пълен audit log** — всяка команда (изпълнена, отказана или завършила с грешка) се добавя към `command-audit.log` в папката с данните на Tomo (`~/.local/share/tomo` в Linux, `%APPDATA%\tomo\tomo\data` в Windows), с времеви печат.
+- **Timeout** — забила команда не може да блокира асистента.
 
-This is a safety net, not a sandbox. If you want strong isolation, run Tomo
-under a dedicated user or inside a container.
+ Това е предпазна мрежа, а не sandbox. Ако искате силна изолация, стартирайте Tomo с отделен потребител или в контейнер.
 
 ---
 
-## Operating your desktop (apps, clicks, toggles)
+ ## Управление на работния плот (приложения, кликове, превключватели)
 
-Tomo reads what your desktop can do straight from the OS and can act on it two
-ways, with the model choosing between them:
+ Tomo прочита директно от операционната система какво може да прави вашият десктоп и може да действа по два начина, като моделът избира между тях:
 
-- **What it knows** — `apps.rs` finds the installed apps: on Linux the
-  freedesktop `.desktop` files (system, user, Flatpak), on Windows the Start
-  Menu's shortcuts. On Linux it also probes for the tools that drive system
-  switches (`rfkill`, `nmcli`, `pactl`/`wpctl`) to offer **toggles**
-  (Bluetooth, Wi-Fi, mute); on Windows the model uses PowerShell for those.
-  It scans at boot and re-scans on a light interval, refreshing only on change.
+ - **Какво знае** — `apps.rs` намира инсталираните приложения: в Linux — freedesktop `.desktop` файловете (системни, потребителски, Flatpak), а в Windows — shortcuts от Start Menu. В Linux също така проверява за инструментите, които управляват системните превключватели (`rfkill`, `nmcli`, `pactl`/`wpctl`), за да предложи **превключватели** (Bluetooth, Wi-Fi, mute); в Windows моделът използва PowerShell за тях. Сканирането се извършва при стартиране и след това през лек интервал, като се обновява само при промяна.
+- **Кликване (наблюдаемо)** — персонажът отива до определено място на екрана и управлява реалния курсор/клавиатура чрез `enigo`. Подходящо е за бързи действия с един или два клика, които е забавно да наблюдавате.
+- **Команда („контрол чрез мисъл“) —** действието се изпълнява незабавно, без видимо кликване.
 
-- **Clicking (watchable)** — the character walks to a screen spot and drives
-  the real cursor/keyboard via `enigo`. Good for quick, one- or two-click
-  actions that are fun to watch.
+ **Съгласието е вградено.** Реалната симулация на вход е зад `control` cargo feature (изключен по подразбиране — без него приложението само записва какво _би_ направило). Докато персонажът управлява входа, се показва червен знак **„Tomo управлява работния плот“**, а panic hotkey (Ctrl+Alt+Esc или Pause) незабавно освобождава контрола и казва на мозъка да спре.
 
-- **Command ("mind control")** — it runs the action instantly with no visible
-  clicking.
-
-**Consent is built in.** Real input synthesis is behind the `control` cargo
-feature (off by default — without it the app logs what it *would* do). While the
-character is driving input a **red "Tomo is controlling the desktop" badge** is
-shown, and a **panic hotkey (Ctrl+Alt+Esc, or Pause)** instantly releases
-control and tells the brain to stop.
-
-```bash
-cargo run --release --features control     # X11: also install `xdotool`
-                                           # Wayland: run `ydotoold`
+```
+cargo run --release --features control     # X11: инсталирайте и `xdotool`
+                                           # Wayland: стартирайте `ydotoold`
 ```
 
-To find where to click, `find_on_screen` shows the model a screenshot (noted
-in the chat, like every look) and it reads the target's coordinates off it.
+ За да намерите къде да кликнете, `find_on_screen` показва на модела снимка на екрана (отбелязана в чата, както всяко разглеждане), а той определя координатите на целта от нея.
 
 ---
 
-## <a name="status"></a>What's done vs. what needs work
+ ## \<a name="status"\>\</a\>Какво е готово и какво остава
 
-**Done and unit-tested (`cargo test --workspace`, 72 tests, on Linux and
-Windows in CI):**
+ **Готово и покрито с unit тестове (`cargo test --workspace`, 72 теста, на Linux и Windows в CI):**
 
-- ✅ A local model's tool-use loop over Ollama's API or the OpenAI-compatible
-  one (LM Studio), finding the server and a local model by itself; tool calls
-  written into the text and `<think>` notes are handled; a model that can't
-  see images still gets the rest of the conversation
-- ✅ Piper voice in a helper that loads it once; replies cleaned of markdown
-  and emoji first
-- ✅ "Hey Tomo" (Vosk + Whisper) and push-to-talk; the microphone through
-  PipeWire/PulseAudio/ALSA on Linux and PortAudio on Windows
-- ✅ SQLite memory; audited, deny-listed command executor (Linux and Windows
-  rules); screenshots on Linux, Windows and macOS
-- ✅ Rigid-body physics, physics-driven animation of the VRM 1.0 rig, spring
-  bones, MToon shading
-- ✅ Characters: switching from the chat or by asking, importing a `.vrm`
-- ✅ Layer-shell overlay on Wayland (Hyprland, Sway, KDE): above all windows,
-  click-through except on the character and the open chat
-- ✅ Adaptive frame rate: about 13% of one core at rest on Linux
-- ✅ Windows: builds, passes the tests, and packs into an installer in CI
+ - ✅ Цикъл за използване на инструменти от локален модел чрез API на Ollama или OpenAI-съвместимия интерфейс (LM Studio), като сървърът и локалният модел се откриват автоматично; tool calls, записани в текста, и `<think>` бележките се обработват; модел, който не може да вижда изображения, все пак получава останалата част от разговора
+- ✅ Piper voice в помощен процес, който го зарежда веднъж; отговорите първо се почистват от Markdown и emoji
+- ✅ „Hey Tomo“ (Vosk + Whisper) и push-to-talk; микрофонът използва PipeWire/PulseAudio/ALSA в Linux и PortAudio в Windows
+- ✅ SQLite памет; одитиран изпълнител на команди със забранен списък (правила за Linux и Windows); снимки на екрана в Linux, Windows и macOS
+- ✅ Физика на твърди тела, управлявана от физиката анимация на VRM 1.0 rig-а, spring bones, MToon shading
+- ✅ Персонажи: превключване от чата или чрез заявка, импортиране на `.vrm`
+- ✅ Layer-shell overlay в Wayland (Hyprland, Sway, KDE): над всички прозорци, пропуска кликванията навсякъде освен върху персонажа и отворения чат
+- ✅ Адаптивна кадрова честота: около 13% от едно ядро в покой под Linux
+- ✅ Windows: компилира се, преминава тестовете и се пакетира в инсталатор чрез CI
 
-**Needs trying on real hardware:**
+ **Необходимо е тестване на реален хардуер:**
 
-- 🔧 **Windows desktop behaviour** — transparency, click-through, the window
-  over the work area, and the voice setup have been written for Windows but
-  not yet seen running on a Windows PC. Transparency depends on the graphics
-  driver; if the background shows black, try the compatibility shortcut.
-- 🔧 `TODO(input-region)` — click-through for the regular window on X11 and
-  GNOME Wayland (the Wayland overlay and Windows already do it).
-- 🔧 `TODO(fluid)` — the liquid is merging circles; an SDF/metaball shader
-  would be glossier.
-- 🔧 VRM 0.x models load but aren't animated; HiDPI (scaled screens) is
-  untested; "Hey Tomo" understands English only.
-- ⚠️ **GNOME Wayland** ignores always-on-top and has no `wlr-layer-shell`.
+ - 🔧 **Поведение на Windows десктопа** — прозрачността, пропускането на кликове, прозорецът над работната област и настройката на гласа са реализирани за Windows, но все още не са наблюдавани на реален Windows компютър. Прозрачността зависи от графичния драйвер; ако фонът е черен, опитайте compatibility shortcut-а.
+- 🔧 `TODO(input-region)` — пропускане на кликванията за стандартния прозорец в X11 и GNOME Wayland (Wayland overlay-ът и Windows вече го поддържат).
+- 🔧 `TODO(fluid)` — течността в момента представлява сливащи се кръгове; SDF/metaball shader би изглеждал по-лъскав.
+- 🔧 VRM 0.x моделите се зареждат, но не се анимират; HiDPI (мащабирани екрани) не е тестван; „Hey Tomo“ разбира само английски.
+- ⚠️ **GNOME Wayland** игнорира always-on-top и няма `wlr-layer-shell`.
 
-### Tests and the Windows installer
+ ### Тестове и Windows инсталаторът
 
-```bash
-cargo test --workspace              # 72 tests: brain, physics, springs, MToon…
+```
+cargo test --workspace              # 72 теста: мозък, физика, springs, MToon…
 ```
 
-Every push runs [`.github/workflows/build.yml`](.github/workflows/build.yml):
-clippy and the tests on Linux and Windows, then the Windows release build and
-the installer (`packaging/windows/tomo.iss`, Inno Setup), uploaded as the
-`Tomo-Setup-windows` artifact. Pushing a tag like `v0.2.0` also attaches the
-installer to a GitHub release.
+ При всяко push-ване се изпълнява `.github/workflows/build.yml`: clippy и тестовете на Linux и Windows, след което Windows release build и инсталаторът (`packaging/windows/tomo.iss`, Inno Setup) се качват като артефакт `Tomo-Setup-windows`.
+
+ При push на tag като `v0.2.0` инсталаторът също се прикачва към GitHub release.
 
 ---
 
-## License
+ ## Лиценз
 
-MIT — see `LICENSE`.
+ MIT — вижте `LICENSE`.
