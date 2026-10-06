@@ -10,12 +10,23 @@ Send, Talk, менюто с персонажи, гласът, изходът.
 2. КАК РАБОТИ
 Машина на състоянията (Phase):
   CLOSED  → клик върху нея (или „Hey Tomo“ — тогава тя и подскача)
-  SLIDING → тя отива на 0.86 от ширината (DOCK_FRACTION) и спира
+  SLIDING → тя отива вдясно и спира до мястото на прозореца (dock_x):
+            вляво от панела, на половината ширина на тялото ѝ плюс
+            DOCK_GAP = 24 px от ръба му — прозорецът никога не я закрива
   LIQUID  → капката израства от нея (0.55 s)
   OPEN    → прозорецът е готов, полето за писане е на фокус
   CLOSING → стопява се обратно (0.40 s) → CLOSED; тя пак се разхожда
 Затваряне: ×, Escape, клик другаде (не върху нея и не върху панела) или
 нов клик върху нея.
+Докато чатът е отворен, тя не отива под него: keep_clear() ограничава
+молбите на модела да ходи (walk_to) до мястото ѝ до прозореца (app.py);
+наляво може да отиде навсякъде.
+Иконите в бутоните (icon_button) са точно в средата: бутонът се рисува без
+текст, а иконата отгоре — по истинските граници на глифа (centred_icon,
+centre_glyph). Обикновеният бутон на ImGui слага текста след вътрешния
+отстъп и го центрира само ако се побира — иконите излизаха до 5 px вдясно.
+Остатъкът е до половин пиксел: икона с нечетна ширина не може да е точно в
+средата на бутон с четна ширина, без да се размаже.
 Прозорецът (340 × 460, вдясно, вертикално в средата): заглавие „Tomo“ и
 бутони с икони — персонажи (меню с наличните и „Import a .vrm…“), глас
 (вкл./изкл. → SetVoice), изход (Shutdown), затваряне; историята с
@@ -38,12 +49,13 @@ send_message() праща UserMessage(текст, снимки) — позвол
 избраното се връща през опашката picked (take_picked() в кадъра).
 
 3. ОСНОВНИ ЕЛЕМЕНТИ
-  ChatState — receive, character_clicked, start_opening, dismiss, advance,
-    shown, add_images, take_picked, paste, send_message, draw, draw_window,
-    draw_pending, character_menu
-  Phase, panel_rect, bubble, pictures, draw_liquid, icon_button,
+  ChatState — receive, character_clicked, start_opening, keep_clear,
+    dismiss, advance, shown, add_images, take_picked, paste, send_message,
+    draw, draw_window, draw_pending, character_menu
+  Phase, panel_rect, dock_x, dock_fraction, bubble, pictures, draw_liquid,
+  icon_button, centred_icon, centre_glyph,
   pick_files, pick_character_file, pick_images, paste_images, open_file
-  PENDING_EDGE = 44 px, PICTURE_EDGE = 150 px
+  DOCK_GAP = 24 px, PENDING_EDGE = 44 px, PICTURE_EDGE = 150 px
 
 4. ВРЪЗКИ
 Използва: ui, movement (Locomotion), events, platform, attachments.
@@ -51,7 +63,10 @@ send_message() праща UserMessage(текст, снимки) — позвол
 
 5. ТЕСТОВЕ
 tests/test_body.py — клик → ходене → капка → отворен → клик другаде →
-затворен; кликовете върху панела или нея не го затварят; Escape; „Hey
+затворен, като тя спира на DOCK_GAP от панела; мястото до прозореца е
+свободно на екрани с различна ширина; докато чатът е отворен, не я пращат
+под него; иконите са в средата (до половин пиксел); кликовете върху панела
+или нея не го затварят; Escape; „Hey
 Tomo“ подскача и отваря; историята пази последните 400 реда; снимките
 чакат до 4 и заминават със следващото съобщение (и сами); поставяне от
 клипборда (снимка, копирани файлове, текст, липсващ инструмент).

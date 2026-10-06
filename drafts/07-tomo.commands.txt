@@ -14,7 +14,9 @@ Tomo помага с компютъра чрез команди (звук, пр�
      изпълнява, само се записва REFUSED;
   2) твърд черен списък (hard_denied, _windows_denied) — отказва се дори при
      включен превключвател: rm -rf /, mkfs, dd върху диск, fork bomb,
-     curl|sh; format, Format-Volume, Clear-Disk, diskpart, bcdedit,
+     curl|sh; format (и format.com/format.exe), щом след него в командата
+     има буква на диск, каквито и ключове да стоят между тях
+     („format -f C:“), Format-Volume, Clear-Disk, diskpart, bcdedit,
      vssadmin delete shadows, изтриване на C:\ или системните папки,
      reg delete HKLM\…, iwr … | iex и подобни;
   3) ограничение от 20 s (COMMAND_TIMEOUT), изходът е до 16 KB;

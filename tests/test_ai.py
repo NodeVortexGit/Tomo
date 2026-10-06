@@ -13,6 +13,7 @@ from tomo.ai import (ACT_NOW, CHECK_RESULTS, AiClient, Api, ModelInfo, Msg, Shar
                      billions, calls_in_text, claims_success, conversation, ollama_request, only_promises,
                      openai_request, parse_ollama, parse_openai, pick_model, server_candidates, tidy, tool_names,
                      tool_specs, without_thinking)
+from tomo.apps import DesktopApp, SystemCatalog
 from tomo.commands import Executor
 from tomo.config import Config, LlmProvider
 from tomo.db import Store
@@ -133,6 +134,9 @@ def test_failures_and_claims_are_recognised():
     assert action_failed("no installed app is called 'wrod'; the nearest names: Word")
     assert not action_failed("exit=0")
     assert not action_failed("exit=0\nstdout:\nvolume=40 muted=false")
+    # An app that was started but isn't running is no success either.
+    assert not action_failed("exit=0\nstdout:\nOPEN: chrome is running, window: New Tab - Google Chrome")
+    assert action_failed("exit=0\nstdout:\nNOT CONFIRMED: it did not open (its program is not running 8 s after the start)")
     assert claims_success("I've opened Word, Excel, and PowerPoint, but I couldn't close DeepCool.")
     assert claims_success("I was able to open Word, Excel, and PowerPoint, but I couldn't close DeepCool.")
     assert claims_success("Готово, отворих браузъра.")
@@ -271,6 +275,37 @@ def test_the_reply_is_asked_for_in_the_users_language(tmp_path):
     ai_client = client(tmp_path, FakeServer([]))
     assert ai_client.system_prompt(Language.of("Колко е часът?")).endswith("answer in Bulgarian.")
     assert ai_client.system_prompt(Language.of("What time is it?")).endswith("answer in English.")
+
+
+def test_the_persona_asks_for_certainty_before_answering(tmp_path):
+    prompt = client(tmp_path, FakeServer([])).system_prompt(Language.ENGLISH)
+    assert "be certain each command did its job" in prompt
+    for example in ('"Open Chrome" means the Chrome browser is open', '"open settings" means Settings is open',
+                    '"set the volume to 30" means it is at exactly 30'):
+        assert example in prompt
+
+
+def test_the_persona_opens_an_app_step_by_step(tmp_path, monkeypatch):
+    ai_client = client(tmp_path, FakeServer([]))
+    monkeypatch.setattr(ai.platform, "WINDOWS", True)
+    steps = ai_client.system_prompt(Language.ENGLISH).split("To open an app:")[1]
+    # Find the installed app whose name means the one asked for, as the system lists them…
+    assert "Get-StartApps" in steps and "Photos isn't Photoshop" in steps and "калкулатора" in steps
+    # …open it at once, and only with open_app…
+    assert "don't ask first" in steps and "never with Start-Process" in steps
+    # …and report an error rather than say it opened.
+    assert "NOT CONFIRMED" in steps and "never that it opened" in steps
+    monkeypatch.setattr(ai.platform, "WINDOWS", False)
+    steps = ai_client.system_prompt(Language.ENGLISH).split("To open an app:")[1]
+    assert ".desktop" in steps and "NOT CONFIRMED" not in steps and "never that it opened" in steps
+
+
+def test_an_app_that_isnt_found_comes_back_with_what_to_do_next(tmp_path):
+    ai_client = client(tmp_path, FakeServer([]))
+    ai_client.catalog.set(SystemCatalog([DesktopApp("word", "Word", "Start-Process 'word'")]))
+    result = asyncio.run(ai_client.dispatch_tool("open_app", {"name": "wrod"}, []))
+    assert action_failed(result) and "the nearest names: Word" in result
+    assert "open it now" in result and "English name" in result and "isn't installed" in result
 
 
 def test_it_prefers_tomos_own_model():

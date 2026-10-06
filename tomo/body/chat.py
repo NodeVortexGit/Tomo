@@ -3,7 +3,8 @@
 A small state machine, end to end:
 
 1. The user clicks the character (or says "Hey Tomo").
-2. She walks to the right side of the screen.        (``Phase.SLIDING``)
+2. She walks right, stopping beside where the        (``Phase.SLIDING``)
+   window will be — clear of it, so it never covers her (``dock_x``).
 3. A "liquid" blob comes out of her and grows.       (``Phase.LIQUID``)
 4. Once fully out, the liquid forms the chat window. (``Phase.OPEN``)
 5. Closing reverses it: the window melts back in.    (``Phase.CLOSING``)
@@ -39,13 +40,13 @@ from imgui_bundle import imgui
 
 from .. import attachments, events, platform
 from ..events import CharacterChoice, ChatLine, ImportCharacter, Role, SetVoice, Shutdown, StartVoiceInput, UserMessage
-from .movement import Locomotion
+from .movement import Locomotion, body_size
 from .ui import (ICON_CLOSE, ICON_IMAGE, ICON_MIC, ICON_MUTED, ICON_PAPERCLIP, ICON_POWER, ICON_SEND, ICON_USER,
                  ICON_VOLUME, flags, rgba, vec4)
 
 log = logging.getLogger(__name__)
 
-DOCK_FRACTION = 0.86  # where she parks to open the chat, a share of the width
+DOCK_GAP = 24.0  # logical px between her body and the panel while the chat is out
 LIQUID_GROW_SECS = 0.55  # for the liquid to come fully out…
 LIQUID_MELT_SECS = 0.40  # …and to melt back
 PANEL_W, PANEL_H = 340.0, 460.0  # logical px
@@ -70,6 +71,21 @@ def panel_rect(width: float, height: float) -> tuple[float, float, float, float]
     x1 = width - MARGIN
     y0 = height * 0.5 - PANEL_H * 0.5
     return x1 - PANEL_W, y0, x1, y0 + PANEL_H
+
+
+def dock_x(width: float, half_body: float) -> float:
+    """Where she stands while the chat is out (her feet's x, logical px):
+    left of the panel, with her body's half-width and DOCK_GAP between her
+    and its edge, so the window never covers her."""
+    return max(half_body, panel_rect(width, 0.0)[0] - DOCK_GAP - half_body)
+
+
+def dock_fraction(loco: Locomotion) -> float:
+    """:func:`dock_x` as the share of the width that ``walk_to`` takes."""
+    width = loco.arena.x
+    if width <= 0.0:  # not on screen yet
+        return 0.5
+    return dock_x(width, body_size(loco.height).x) / width
 
 
 def inside(rect, x: float, y: float) -> bool:
@@ -180,10 +196,16 @@ class ChatState:
             self.phase = Phase.CLOSING
 
     def start_opening(self, loco: Locomotion) -> None:
-        """The first step: walk to the dock (the liquid grows once there)."""
+        """The first step: walk to the dock, beside where the panel will be
+        (the liquid grows once she's there)."""
         self.phase = Phase.SLIDING
         loco.held = True
-        loco.walk_to(DOCK_FRACTION)
+        loco.walk_to(dock_fraction(loco))
+
+    def keep_clear(self, position: float, loco: Locomotion) -> float:
+        """Where she may walk (a share of the width) when asked to: while the
+        chat is out, no further right than the dock, so it never covers her."""
+        return position if self.phase == Phase.CLOSED else min(position, dock_fraction(loco))
 
     def dismiss(self, escape: bool, clicked_at: tuple[float, float] | None, character_rect, width: float,
                 height: float) -> None:
@@ -200,7 +222,7 @@ class ChatState:
         # A character swapped in while the chat is out comes over to it too.
         if self.phase != Phase.CLOSED and loco is not None and not loco.held:
             loco.held = True
-            loco.walk_to(DOCK_FRACTION)
+            loco.walk_to(dock_fraction(loco))
         if self.phase == Phase.SLIDING:
             if loco is None or loco.is_idle():
                 self.phase, self.liquid_t = Phase.LIQUID, 0.0
@@ -229,7 +251,7 @@ class ChatState:
         if self.phase == Phase.CLOSED:
             return False
         t = ease_out_cubic(self.liquid_t)
-        start = source or (width * DOCK_FRACTION, height * 0.5)
+        start = source or (panel_rect(width, height)[0] - DOCK_GAP, height * 0.5)
         draw_liquid(start, t, width, height)
         if self.phase == Phase.OPEN or self.liquid_t > 0.85:
             close, quit_ = self.draw_window(ui, t, width, height, showing, send)
@@ -267,7 +289,7 @@ class ChatState:
         imgui.same_line()
         voice_icon = ICON_VOLUME if self.voice_replies else ICON_MUTED
         if icon_button(voice_icon, "Speak replies aloud: " + ("on" if self.voice_replies else "off"), size,
-                       active=self.voice_replies):
+                       active=self.voice_replies, key="voice"):
             self.voice_replies = not self.voice_replies
             send(SetVoice(self.voice_replies))
         imgui.same_line()
@@ -348,7 +370,9 @@ class ChatState:
                 s = PENDING_EDGE / max(w, h)
                 clicked = imgui.image_button(f"pending-{i}", texture, imgui.ImVec2(w * s, h * s))
             else:  # still being read, or unreadable
-                clicked = imgui.button(f"{ICON_IMAGE}##pending-{i}", imgui.ImVec2(PENDING_EDGE, PENDING_EDGE))
+                clicked = imgui.button(f"##pending-{i}", imgui.ImVec2(PENDING_EDGE, PENDING_EDGE))
+                centred_icon(ICON_IMAGE, imgui.get_item_rect_min(), imgui.get_item_rect_max(),
+                             imgui.get_color_u32(imgui.Col_.text.value))
             if imgui.is_item_hovered():
                 imgui.set_tooltip(f"{path.name} — click to take it off")
             if clicked:
@@ -372,15 +396,38 @@ class ChatState:
             pick_character_file(send)
 
 
-def icon_button(icon: str, tip: str, size: float, active: bool = True) -> bool:
-    if not active:
-        imgui.push_style_color(imgui.Col_.text.value, vec4(120, 120, 120))
-    clicked = imgui.button(icon, imgui.ImVec2(size, size))
-    if not active:
-        imgui.pop_style_color()
-    if imgui.is_item_hovered():
+def icon_button(icon: str, tip: str, size: float, active: bool = True, key: str | None = None) -> bool:
+    """A square button with its icon in the exact middle. (ImGui places a
+    button's label after the frame padding, centred only when it fits: an
+    icon wider than the room left starts at the padding instead, off to the
+    right. So the button is drawn without a label, and the icon on top of
+    it by its own drawn bounds.) ``key`` keeps the button the same while its
+    icon or tip changes."""
+    clicked = imgui.button(f"##{key or tip}", imgui.ImVec2(size, size))
+    lo, hi = imgui.get_item_rect_min(), imgui.get_item_rect_max()
+    hovered = imgui.is_item_hovered()
+    colour = rgba(120, 120, 120) if not active else imgui.get_color_u32(imgui.Col_.text.value)
+    centred_icon(icon, lo, hi, colour)
+    if hovered:
         imgui.set_tooltip(tip)
     return clicked
+
+
+def centred_icon(icon: str, lo, hi, colour: int) -> None:
+    """Draw one icon (a glyph of the current font) with its drawn shape in
+    the exact middle of the box ``lo``–``hi``."""
+    glyph = imgui.get_font_baked().find_glyph(ord(icon))
+    x, y = centre_glyph((lo.x, lo.y, hi.x, hi.y), (glyph.x0, glyph.y0, glyph.x1, glyph.y1))
+    imgui.get_window_draw_list().add_text(imgui.get_font(), imgui.get_font_size(), imgui.ImVec2(x, y), colour, icon)
+
+
+def centre_glyph(box, glyph) -> tuple[float, float]:
+    """The text position that puts a glyph's drawn bounds (x0, y0, x1, y1,
+    relative to that position) in the middle of ``box`` (x0, y0, x1, y1) —
+    in whole pixels, as ImGui draws text."""
+    x = (box[0] + box[2] - glyph[0] - glyph[2]) * 0.5
+    y = (box[1] + box[3] - glyph[1] - glyph[3]) * 0.5
+    return float(round(x)), float(round(y))
 
 
 BUBBLES = {Role.USER: ((70, 130, 180), "You"), Role.ASSISTANT: ((38, 66, 74), "Tomo"), Role.SYSTEM: ((60, 60, 60), "•")}
@@ -443,7 +490,9 @@ def pictures(line: ChatLine, thumbnails, place: Callable[[float], None], widest:
             imgui.same_line()
         box = imgui.ImVec2(w * fit, h * fit)
         if texture is None:
-            clicked = imgui.button(f"{ICON_IMAGE}##picture-{i}", box)
+            clicked = imgui.button(f"##picture-{i}", box)
+            centred_icon(ICON_IMAGE, imgui.get_item_rect_min(), imgui.get_item_rect_max(),
+                         imgui.get_color_u32(imgui.Col_.text.value))
         else:
             clicked = imgui.image_button(f"picture-{i}", texture, box)
         if imgui.is_item_hovered():

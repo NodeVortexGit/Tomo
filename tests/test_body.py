@@ -11,10 +11,10 @@ from bodies import Body
 from tomo import events
 from tomo.body import vrm
 from tomo.body.animation import Animator, Bone, Rig, animate_face, mirror_pose, pose_body, target_pose
-from tomo.body.chat import DOCK_FRACTION, ChatState, Phase, panel_rect
+from tomo.body.chat import DOCK_GAP, ChatState, Phase, centre_glyph, dock_fraction, dock_x, panel_rect
 from tomo.body.control import Control
 from tomo.body.mathx import IDENTITY, Vec2, qmul, qrot
-from tomo.body.movement import Locomotion, Stance
+from tomo.body.movement import Locomotion, Stance, body_size
 from tomo.body.skeleton import Skeleton
 from tomo.body.window import Desktop, DisplayServer, detect_desktop, detect_server
 from tomo.body.workout import Workout, hip_drop, mirrored
@@ -224,28 +224,67 @@ def test_the_lock_follows_the_brain():
 # ---- the chat ------------------------------------------------------------------------------------
 
 
-def settled(x=300.0):
+def settled(x=300.0, width=1920.0):
     loco = Locomotion(seed=5)
     loco.placed, loco.stance = True, Stance.STANDING
     loco.com = Vec2(x, 1080.0 - 0.55 * 320.0)
+    loco.arena = Vec2(width, 1080.0)
     return loco
 
 
 def test_a_click_walks_her_over_then_the_chat_grows_out_of_her():
     chat, loco = ChatState(), settled()
     chat.character_clicked(loco)
-    assert chat.phase == Phase.SLIDING and loco.held and loco.target == DOCK_FRACTION
+    assert chat.phase == Phase.SLIDING and loco.held and loco.target == dock_fraction(loco)
     for _ in range(600):
-        loco.step(1 / 60, Vec2(1920, 1080), Vec2(80, 320))
+        loco.step(1 / 60, Vec2(1920, 1080), body_size(320))
         chat.advance(1 / 60, loco)
     assert chat.phase == Phase.OPEN and chat.liquid_t == 1.0
-    assert abs(loco.feet(320).x - DOCK_FRACTION * 1920) < 1.0
+    # She stops beside the window, never under it: her body ends DOCK_GAP
+    # before the panel begins.
+    feet = loco.feet(320).x
+    assert abs(feet - dock_x(1920, body_size(320).x)) < 1.0
+    assert abs(feet + body_size(320).x + DOCK_GAP - panel_rect(1920, 1080)[0]) < 1.0
     # Clicking away closes it; she's free to wander again.
     chat.dismiss(False, (100.0, 100.0), (1600, 700, 1700, 1080), 1920, 1080)
     assert chat.phase == Phase.CLOSING
     for _ in range(60):
         chat.advance(1 / 60, loco)
     assert chat.phase == Phase.CLOSED and not loco.held
+
+
+@pytest.mark.parametrize("width", [1920.0, 1366.0, 1280.0, 1024.0])
+def test_the_dock_is_clear_of_the_window_on_any_screen(width):
+    half = body_size(320).x
+    x = dock_x(width, half)
+    assert x - half >= 0.0, "on screen"
+    assert x + half + DOCK_GAP <= panel_rect(width, 720.0)[0] + 1e-6, "left of the window, with a gap"
+
+
+def test_while_the_chat_is_out_she_isnt_sent_under_it():
+    loco = settled()
+    chat = ChatState()
+    assert chat.keep_clear(0.95, loco) == 0.95, "closed: anywhere"
+    chat.phase = Phase.OPEN
+    assert chat.keep_clear(0.95, loco) == dock_fraction(loco), "out: no further right than the dock"
+    assert chat.keep_clear(0.2, loco) == 0.2, "to the left is fine"
+
+
+def test_icons_are_placed_by_their_drawn_bounds():
+    # A 28 px button at (100, 10); glyphs given by their drawn bounds
+    # relative to where the text is drawn.
+    box = (100.0, 10.0, 128.0, 38.0)
+    for glyph in [(1.0, 4.0, 15.0, 18.0), (0.0, 2.0, 18.0, 16.0), (2.0, 3.0, 17.0, 17.0), (-1.0, 5.0, 12.0, 15.0)]:
+        x, y = centre_glyph(box, glyph)
+        assert x == int(x) and y == int(y), "whole pixels"
+        drawn = (x + glyph[0], y + glyph[1], x + glyph[2], y + glyph[3])
+        off_x = (drawn[0] + drawn[2]) / 2 - (box[0] + box[2]) / 2
+        off_y = (drawn[1] + drawn[3]) / 2 - (box[1] + box[3]) / 2
+        # Exactly in the middle — or half a pixel off where an odd-sized
+        # glyph can't be, in an even-sized box.
+        assert abs(off_x) <= 0.5 and abs(off_y) <= 0.5, glyph
+        assert off_x == 0.0 or (glyph[2] - glyph[0]) % 2 == 1
+        assert off_y == 0.0 or (glyph[3] - glyph[1]) % 2 == 1
 
 
 def test_clicks_on_the_panel_or_her_dont_close_it():

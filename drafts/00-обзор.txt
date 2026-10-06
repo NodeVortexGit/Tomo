@@ -71,7 +71,7 @@ Cori според това дали персонажът е мъжки или ж
   python -m tomo                      (приложението)
   python -m tomo ask "въпрос"         (само мозъкът, от терминала)
   python -m tomo ask --image снимка.jpg "въпрос"   (със снимка)
-  python -m pytest -q                 (149 теста)
+  python -m pytest -q                 (170 теста)
 
 В Windows: .venv\Scripts\python -m tomo (или pythonw — без конзола).
 

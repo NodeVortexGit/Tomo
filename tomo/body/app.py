@@ -195,7 +195,8 @@ class App:
         if isinstance(event, events.LoadCharacter):
             self.load(Path(event.path))
         elif isinstance(event, events.WalkTo):
-            self.loco.walk_to(event.position)
+            # Not under the chat while it's out.
+            self.loco.walk_to(self.chat.keep_clear(event.position, self.loco))
             self.loco.idle_timer = 4.0  # don't wander off right after being asked
         elif isinstance(event, events.Animate):
             self.animator.cue(event)

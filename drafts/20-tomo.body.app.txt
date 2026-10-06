@@ -10,7 +10,9 @@
 
 2. КАК РАБОТИ — ЕДИН КАДЪР (App.frame)
   1) изпразва съобщенията от мозъка (brain.poll) и ги разпраща
-     (dispatch): LoadCharacter → зареждане; WalkTo, Animate → физиката;
+     (dispatch): LoadCharacter → зареждане; WalkTo (докато чатът е
+     отворен — не по-надясно от мястото до него: chat.keep_clear), Animate
+     → физиката;
      Emote, Speaking → аниматора; Chat, Thinking, Listening → аниматора и
      чата; ClickAt, TypeText, ControlMode → управлението; HealthLock,
      HealthProgress, Pose → заключващия екран;

@@ -192,7 +192,9 @@ def _windows_denied(c: str) -> str | None:
         w = w.strip("\"'")
         return len(w) >= 2 and w[0].isascii() and w[0].isalpha() and w[1] == ":" and w[2:].strip("\\/*") == ""
 
-    if any(a == "format" and is_drive(b) for a, b in zip(words, words[1:])):
+    # Whatever switches come before the drive: "format -f C:", "format.com /q D:".
+    if any(w.strip("\"'").rsplit("\\", 1)[-1] in ("format", "format.com", "format.exe")
+           and any(is_drive(after) for after in words[i + 1:]) for i, w in enumerate(words)):
         return "refuses to format a drive"
 
     def precious(w: str) -> bool:

