@@ -10,7 +10,8 @@ physics, the pose, the drawing.
    the chat (or pasted into it), a pending real click;
 5. place her on screen — or, during a health round, big in the middle as
    the user's mirror — then pose her bones and face and swing her hair;
-6. draw her, then the interface (chat, lock screen card, control badge);
+6. draw her, then the interface (chat, lock screen card, control badge),
+   and give the pointer the shape it asks for (an I-beam over text);
 7. show the frame: at the display's rate while anything moves, 24 a second
    at rest.
 """
@@ -65,6 +66,8 @@ KEYS = {
     glfw.KEY_LEFT_ALT: imgui.Key.left_alt, glfw.KEY_RIGHT_ALT: imgui.Key.right_alt,
     glfw.KEY_LEFT_SUPER: imgui.Key.left_super, glfw.KEY_RIGHT_SUPER: imgui.Key.right_super,
 }
+# The pointer's shape over the interface, as ImGui asks (anything else: the arrow).
+POINTERS = {imgui.MouseCursor_.text_input.value: glfw.IBEAM_CURSOR, imgui.MouseCursor_.hand.value: glfw.HAND_CURSOR}
 
 
 @dataclass
@@ -315,6 +318,7 @@ class App:
                               c.screen_rect if c else None, width, height)
             self.pictures(frame_input)
             busy |= self.chat.advance(dt, self.loco if c else None)
+            busy |= self.chat.selection.dragging  # scrolling as it selects past the edge
         self.control.update(self.loco if c else None)
 
         if c is not None:
@@ -348,6 +352,7 @@ class App:
         self.control.draw_badge(width)
         self.ui.end()
 
+        self.window.set_pointer(POINTERS.get(imgui.get_mouse_cursor()))
         self.window.set_mouse_wanted(self.wants_mouse(width, height))
         self.window.finish_frame(busy or self.ui.wants_keyboard())
 

@@ -173,6 +173,8 @@ class Window:
         self.covering = False
         self.last_push = 0.0
         self.frame_started = time.perf_counter()
+        self.pointer: int | None = None  # the pointer's shape (None: the arrow)
+        self.pointers: dict[int, object] = {}
 
     # ---- geometry -------------------------------------------------------------------------
 
@@ -271,6 +273,16 @@ class Window:
             return
         self.passthrough = not wanted
         glfw.set_window_attrib(self.handle, glfw.MOUSE_PASSTHROUGH, self.passthrough)
+
+    def set_pointer(self, shape: int | None) -> None:
+        """The pointer's shape over the window: one of GLFW's standard ones
+        (an I-beam over text), or None for the arrow."""
+        if shape == self.pointer:
+            return
+        self.pointer = shape
+        if shape is not None and shape not in self.pointers:
+            self.pointers[shape] = glfw.create_standard_cursor(shape)  # None where the system has none
+        glfw.set_cursor(self.handle, self.pointers.get(shape) if shape is not None else None)
 
     def cover(self, on: bool) -> None:
         """A health round: the window over every screen (then back to the

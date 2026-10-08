@@ -29,6 +29,9 @@ Tomo трябва да плава над работния плот, без да 
   курсора; screen_to_logical() — пиксел от екранна снимка → прозореца.
   finish_frame(busy): показва кадъра; в покой чака (wait_events_timeout),
   така че кадрите са до 24 в секунда, но входът остава бърз.
+  set_pointer(shape): формата на курсора над прозореца — стандартен курсор
+  на GLFW (I-образен над текст, ръка) или None за стрелката; курсорите се
+  създават веднъж и се пазят.
 
 Разпознаване на средата (Session.detect): Windows/macOS или Linux
 X11/Wayland и работния плот (KDE, GNOME, XFCE, Cinnamon, Hyprland, i3,
@@ -37,7 +40,8 @@ Sway) — за бележки в журнала.
 3. ОСНОВНИ ЕЛЕМЕНТИ
   Window(session) — work_area, whole_desktop, scale, framebuffer,
     logical_size, to_logical, cursor, screen_to_logical, set_mouse_wanted,
-    cover, keep_in_front, push_front, should_close, finish_frame, close
+    set_pointer, cover, keep_in_front, push_front, should_close,
+    finish_frame, close
   Session, DisplayServer, Desktop, detect_server, detect_desktop
   IDLE_FPS = 24
 

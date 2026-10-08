@@ -44,6 +44,8 @@ ICON_MIC = ""
 ICON_SEND = ""
 ICON_PAPERCLIP = ""
 ICON_IMAGE = ""
+ICON_COPY = ""
+ICON_CHECK = ""
 
 VERTEX = """#version 330 core
 uniform mat4 u_proj;

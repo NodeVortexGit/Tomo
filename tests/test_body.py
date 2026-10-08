@@ -11,7 +11,9 @@ from bodies import Body
 from tomo import events
 from tomo.body import vrm
 from tomo.body.animation import Animator, Bone, Rig, animate_face, mirror_pose, pose_body, target_pose
-from tomo.body.chat import DOCK_GAP, ChatState, Phase, centre_glyph, dock_fraction, dock_x, panel_rect
+from tomo.body.chat import (DOCK_GAP, LINE_END_W, ChatState, Phase, Placed, Selection, caret_at, centre_glyph, char_at,
+                            chat_text, dock_fraction, dock_x, highlight, hit, panel_rect, paragraph_at, selected_text,
+                            word_at, wrap)
 from tomo.body.control import Control
 from tomo.body.mathx import IDENTITY, Vec2, qmul, qrot
 from tomo.body.movement import Locomotion, Stance, body_size
@@ -309,6 +311,113 @@ def test_the_transcript_keeps_the_last_lines():
     for i in range(450):
         chat.receive(events.Chat(ChatLine(Role.USER, f"line {i}")), None)
     assert len(chat.transcript) == 400 and chat.transcript[-1].text == "line 449"
+
+
+def mono(_):
+    return 1.0  # every character one unit wide
+
+
+def texts(text, rows):
+    return [text[row.start:row.end] for row in rows]
+
+
+def test_words_wrap_at_spaces_and_inside_a_word_only_when_they_must():
+    rows = wrap("the quick brown fox", 10.0, mono)
+    assert texts("the quick brown fox", rows) == ["the quick ", "brown fox"]
+    assert rows[0].edges == tuple(float(x) for x in range(11))
+    assert rows[0].width == 9.0, "a space at the end isn't seen"
+    assert texts("abcdefghijklmnopqrstuvwxy", wrap("abcdefghijklmnopqrstuvwxy", 10.0, mono)) == [
+        "abcdefghij", "klmnopqrst", "uvwxy"]
+    text = "one\n\ntwo three four"
+    assert texts(text, wrap(text, 9.0, mono)) == ["one", "", "two three ", "four"]
+
+
+def test_the_pointer_finds_the_nearest_place_in_the_words():
+    rows = wrap("the quick brown fox", 10.0, mono)
+    assert (caret_at(rows[0], 2.4), caret_at(rows[0], 2.6)) == (2, 3)
+    assert (caret_at(rows[0], -5.0), caret_at(rows[0], 99.0)) == (0, 10)
+    assert (char_at(rows[0], 2.6), char_at(rows[0], -1.0), char_at(rows[0], 99.0)) == (2, 0, 9)
+    placed = [Placed(0, 100.0, 50.0, rows), Placed(2, 120.0, 100.0, wrap("hi", 10.0, mono))]
+    assert hit(placed, 103.4, 52.0, 16.0) == ((0, 3), 3)
+    assert hit(placed, 102.6, 70.0, 16.0) == ((0, 13), 12), "the second row"
+    assert hit(placed, 121.0, 95.0, 16.0)[0] == (2, 1), "between messages: the nearer one"
+    assert hit(placed, 0.0, 0.0, 16.0) == ((0, 0), 0), "above it all: the start"
+    assert hit(placed, 0.0, 999.0, 16.0) == ((2, 2), 1), "below: the end"
+    assert hit([], 0.0, 0.0, 16.0) is None
+
+
+def test_a_selection_runs_across_messages_and_copies_their_words():
+    pasted = events.Attachment("x.png", "", "")
+    transcript = [ChatLine(Role.USER, "Open Chrome"), ChatLine(Role.USER, "", attachments=(pasted,)),
+                  ChatLine(Role.ASSISTANT, "Done.\nIt's open.")]
+    s = Selection()
+    s.place((0, 5))
+    assert s.span() is None, "a click selects nothing"
+    s.drag_to((2, 4))
+    assert selected_text(transcript, *s.span()) == "Chrome\n\nDone"
+    assert [s.within(i, len(line.text)) for i, line in enumerate(transcript)] == [
+        (5, 11, True), (0, 0, True), (0, 4, False)]
+    s.drag_to((0, 2))
+    assert selected_text(transcript, *s.span()) == "en ", "back past where it began"
+    # The highlight: on its row, and a little past a row's end where it runs on.
+    done, its_open = wrap("Done.\nIt's open.", 100.0, mono)
+    assert highlight(done, 0, 4, False, 16) == (0.0, 4.0)
+    assert highlight(done, 2, 10, False, 16) == (2.0, 5.0 + LINE_END_W)
+    assert highlight(its_open, 2, 10, False, 16) == (0.0, 4.0)
+    assert highlight(its_open, 0, 3, False, 16) is None
+    assert highlight(its_open, 6, 16, True, 16) == (0.0, 10.0 + LINE_END_W), "on into the next message"
+
+
+def test_double_and_triple_clicks_take_a_word_and_a_paragraph():
+    text = "Don't open Томо's\nsecond, line"
+    assert text[slice(*word_at(text, 2))] == "Don't"
+    assert text[slice(*word_at(text, 12))] == "Томо's"
+    assert text[slice(*word_at(text, 24))] == ","
+    assert paragraph_at(text, 12) == (0, 17) and paragraph_at(text, 20) == (18, len(text))
+    assert word_at("", 0) == (0, 0) == paragraph_at("", 0)
+    s = Selection()
+    s.select((1, 4), (1, 8))  # a double-clicked word: dragging keeps it whole
+    s.drag_to((1, 12))
+    assert s.span() == ((1, 4), (1, 12))
+    s.drag_to((1, 1))
+    assert s.span() == ((1, 1), (1, 8))
+    s.drag_to((1, 6))
+    assert s.span() == ((1, 4), (1, 8))
+
+
+def test_a_selection_stays_on_its_words_as_old_lines_go():
+    chat = ChatState()
+    for i in range(400):
+        chat.receive(events.Chat(ChatLine(Role.USER, f"line {i}")), None)
+    chat.selection.select((200, 0), (201, 4))
+    for i in range(3):
+        chat.receive(events.Chat(ChatLine(Role.ASSISTANT, f"new {i}")), None)
+    assert selected_text(chat.transcript, *chat.selection.span()) == "line 200\n\nline"
+    chat.selection.select((1, 0), (1, 3))
+    chat.receive(events.Chat(ChatLine(Role.USER, "one more")), None)
+    chat.receive(events.Chat(ChatLine(Role.USER, "and another")), None)
+    assert chat.selection.span() is None, "its words have gone"
+
+
+def test_copying_says_so_and_the_whole_chat_says_who_said_what(monkeypatch):
+    from tomo.body import chat as chat_module
+
+    copied = []
+    monkeypatch.setattr(chat_module.imgui, "set_clipboard_text", copied.append)
+    chat = ChatState()
+    chat.copy("hello")
+    assert copied == ["hello"] and chat.notice == "Copied"
+    button = ChatState()
+    button.copy("from a message's button", 3)
+    assert button.copied_line == 3 and button.notice == "", "a tick on the button instead"
+    cat = events.Attachment("x.jpg", "C:/pictures/cat.jpg", "")
+    chat.transcript = [ChatLine(Role.USER, "What's this?", attachments=(cat,)),
+                       ChatLine(Role.ASSISTANT, "A cat.\nA fluffy one."), ChatLine(Role.SYSTEM, "Couldn't attach x"),
+                       ChatLine(Role.USER, "", attachments=(events.Attachment("y.png", "", ""),))]
+    assert chat_text(chat.transcript) == ("You: [picture: cat.jpg]\nWhat's this?\n\nTomo: A cat.\nA fluffy one.\n\n"
+                                          "Note: Couldn't attach x\n\nYou: [picture: pasted]")
+    chat.select_all()
+    assert chat.selection.span() == ((0, 0), (2, 17)), "from the first words to the last"
 
 
 def pictures_in(folder, *names):

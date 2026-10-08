@@ -5,7 +5,8 @@
 
 1. ЗА КАКВО СЛУЖИ
 Разговорът с Tomo с текст и снимки: историята, полето за писане, 📎,
-Send, Talk, менюто с персонажи, гласът, изходът.
+Send, Talk, менюто с персонажи, гласът, изходът; маркиране и копиране на
+текста от разговора.
 
 2. КАК РАБОТИ
 Машина на състоянията (Phase):
@@ -47,15 +48,48 @@ send_message() праща UserMessage(текст, снимки) — позвол
 Диалозите (внос на .vrm, снимки) са общата функция pick_files() във фонова
 нишка — PowerShell OpenFileDialog в Windows, zenity или kdialog в Linux;
 избраното се връща през опашката picked (take_picked() в кадъра).
+Маркиране и копиране: думите в балончетата се нареждат от самия чат
+(wrap()), а не от ImGui — с ширините на буквите от шрифта
+(get_char_advance), за да може всяка точка от екрана да се превърне в
+място в текста. Всеки ред (Row) пази x на всяка граница между буквите;
+Placed записва къде е нарисувано всяко съобщение в текущия кадър, а hit()
+намира най-близкото място до мишката. Selection пази началото (anchor) и
+текущото място (caret) като (номер на реда в историята, буква):
+  - натискане и влачене маркира, и през няколко съобщения; над или под
+    историята тя се превърта сама (SCROLL_SPEED);
+  - двойно кликване маркира дума (word_at: букви и цифри, с апостроф вътре
+    — „don't“), тройно — абзац (paragraph_at); при влачене след тях думата
+    или абзацът остават цели (unit);
+  - Shift+кликване разширява маркираното, клик в празно място го маха;
+  - Ctrl+C копира, Ctrl+A маркира всичко — само докато полето за писане
+    няма клавиатурата (то има свои Ctrl+C и Ctrl+A);
+  - десният бутон отваря меню: „Copy“, „Copy message“, „Select all“ и
+    „Copy the whole chat“ (chat_text: „You: …“, „Tomo: …“, „Note: …“, а
+    снимките като [picture: име]);
+  - докато мишката е върху съобщение, до името под него има бутон, който
+    копира цялото съобщение и за миг става на отметка.
+Копираното от няколко съобщения е разделено с празен ред (selected_text).
+След Ctrl+C или копиране от менюто над полето се появява „Copied“.
+Маркираното е светла ивица под буквите (SELECTED); където продължава след
+края на реда, ивицата стига малко след него (LINE_END_W). Когато най-
+старите редове отпаднат (над 400), маркираното остава върху същите думи
+(lines_dropped). Над текста курсорът е I-образен (app.py →
+window.set_pointer).
 
 3. ОСНОВНИ ЕЛЕМЕНТИ
   ChatState — receive, character_clicked, start_opening, keep_clear,
     dismiss, advance, shown, add_images, take_picked, paste, send_message,
-    draw, draw_window, draw_pending, character_menu
-  Phase, panel_rect, dock_x, dock_fraction, bubble, pictures, draw_liquid,
+    draw, draw_window, draw_pending, character_menu, bubble, layout,
+    paint_words, copy_button, press, select_text, drag_selection,
+    text_menu, text_keys, select_all, copy
+  Selection — span, within, place, select, drag_to, clear, lines_dropped
+  Row, Placed, wrap, caret_at, char_at, hit, highlight, char_kind, word_at,
+  paragraph_at, selected_text, chat_text
+  Phase, panel_rect, dock_x, dock_fraction, pictures, draw_liquid,
   icon_button, centred_icon, centre_glyph,
   pick_files, pick_character_file, pick_images, paste_images, open_file
-  DOCK_GAP = 24 px, PENDING_EDGE = 44 px, PICTURE_EDGE = 150 px
+  DOCK_GAP = 24 px, PENDING_EDGE = 44 px, PICTURE_EDGE = 150 px,
+  COPY_BOX = 16 px, LINE_END_W = 4 px, COPIED_SECS = 1.5 s
 
 4. ВРЪЗКИ
 Използва: ui, movement (Locomotion), events, platform, attachments.
@@ -69,10 +103,24 @@ tests/test_body.py — клик → ходене → капка → отворе
 или нея не го затварят; Escape; „Hey
 Tomo“ подскача и отваря; историята пази последните 400 реда; снимките
 чакат до 4 и заминават със следващото съобщение (и сами); поставяне от
-клипборда (снимка, копирани файлове, текст, липсващ инструмент).
+клипборда (снимка, копирани файлове, текст, липсващ инструмент); думите се
+пренасят на интервал, а вътре в дума — само ако тя е по-дълга от реда;
+мишката намира най-близкото място (над текста — началото, под него —
+края); маркираното минава през няколко съобщения и се копира с празен ред
+между тях, а ивицата стига след края на реда, където продължава; двойно и
+тройно кликване (дума, абзац, на кирилица и с апостроф) и влачене след
+тях; маркираното остава върху същите думи, когато стари редове отпаднат;
+копирането („Copied“ или отметка) и „Copy the whole chat“ с това кой какво
+е казал.
+Маркирането с мишката, автоматичното превъртане, менюто, Ctrl+C/Ctrl+A и
+полето за писане (със свои Ctrl+A/Ctrl+C) са проверени и с ImGui без
+екран (moderngl standalone), с истински вход от мишката и клавиатурата.
 
 6. ЗА ЕКИПА
 - Чатът НЕ добавя сам репликата на потребителя — праща UserMessage и чака
   мозъкът да я върне (виж 03-tomo.events).
 - Командите, които Tomo изпълнява, не се показват в чата — само
   разговорът.
+- Текстът в балончетата се нарежда от wrap(), не от ImGui. Ако промените
+  рисуването на балончето, пазете в съответствие Placed (къде са думите),
+  невидимия бутон върху балончето (натискането) и paint_words (рисуването).
