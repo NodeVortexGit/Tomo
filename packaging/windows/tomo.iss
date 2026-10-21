@@ -39,7 +39,7 @@ CloseApplications=yes
 
 [Tasks]
 Name: "models"; Description: "Set up Tomo's voice, ""Hey Tomo"" and the health programme's camera (downloads the models, about 1 GB, once)"
-Name: "model"; Description: "Download the model Tomo thinks with, for Ollama (qwen3.5:9b, about 6.6 GB; needs Ollama)"
+Name: "model"; Description: "Download the model Tomo thinks with, for Ollama (Gemma 4 12B QAT, about 7.2 GB; needs Ollama 0.30.5 or newer)"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 Name: "autostart"; Description: "Start Tomo when I sign in"; Flags: unchecked
 

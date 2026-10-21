@@ -37,8 +37,10 @@
                   моделите (setup_models.py). Може да се пусне отново за
                   поправка.
   get-model.ps1 — изтегля модела на Tomo за Ollama (по подразбиране
-                  qwen3.5:9b, около 6,6 GB); без Ollama отваря страницата
-                  за изтегляне.
+                  gemma4:12b-it-qat, около 7,2 GB) и за Gemma 4 задава на
+                  потребителя LLAMA_ARG_CACHE_RAM=0 и
+                  LLAMA_ARG_CTX_CHECKPOINTS=4 (после Ollama се рестартира
+                  веднъж); без Ollama отваря страницата за изтегляне.
 
 4. LINUX — install.sh
   .env от образеца → системни пакети (apt / dnf / pacman / zypper: Python,
@@ -47,7 +49,8 @@
   пакети → моделите → проверка за Ollama/LM Studio (предлага модел) →
   запис в менюто с приложения (~/.local/share/applications/tomo.desktop).
   Опции: TOMO_SKIP_SYSDEPS=1, TOMO_SKIP_MODELS=1, TOMO_MODEL=… (по
-  подразбиране qwen3.5:9b).
+  подразбиране gemma4:12b-it-qat; за Gemma 4 напомня как да се зададат
+  двете настройки на Ollama в systemd).
 
 5. CI — .github/workflows/build.yml
   test      — на ubuntu-24.04 и windows-2022: uv, Python 3.12, основните

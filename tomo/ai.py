@@ -98,10 +98,13 @@ TEMPERATURE = 0.7
 # A local model on a CPU can take its time — the first answer longer still.
 REQUEST_TIMEOUT = 600.0
 PROBE_TIMEOUT = 3.0
-# The brain's model: tools, English and Bulgarian, and it sees images; on an
-# 8 GB graphics card it runs entirely on the card. Chosen when TOMO_LLM_MODEL
-# is empty and it's there, and suggested when there's no model at all.
-SUGGESTED_MODEL = "qwen3.5:9b"
+# The brain's model: Gemma 4 12B, quantisation-aware trained (QAT, 4-bit):
+# tools, English and Bulgarian, and it sees images. Measured against
+# qwen3.5:9b on Tomo's 30 tasks it was the most accurate and the most fluent
+# in Bulgarian; on an 8 GB graphics card about a third of it runs on the CPU,
+# so it answers in a few seconds. Chosen when TOMO_LLM_MODEL is empty and
+# it's there, and suggested when there's no model at all.
+SUGGESTED_MODEL = "gemma4:12b-it-qat"
 # Models smaller than this (billions of parameters) answer in words but don't
 # manage tools: asked to run a command, they make up its result.
 TOO_SMALL_FOR_TOOLS = 1.5

@@ -48,9 +48,11 @@ python-dotenv зарежда .env, без да презаписва вече з�
 - Нова настройка: добавете поле в Config, прочетете я в load(), опишете я в
   .env.example и в README.md (раздел 5).
 - API ключът никога не се пише в журнала — използвайте redacted().
-- Моделът за мислене е ЕДИН (решение на собственика на проекта): qwen3.5:9b,
-  зададен в TOMO_LLM_MODEL в .env. Ако е празно — qwen3.5:9b, ако е изтеглен,
-  иначе първият локален (ai.pick_model).
+- Моделът за мислене е ЕДИН (решение на собственика на проекта):
+  gemma4:12b-it-qat, зададен в TOMO_LLM_MODEL в .env. Ако е празно —
+  gemma4:12b-it-qat, ако е изтеглен, иначе първият локален (ai.pick_model).
+  За Gemma 4 Ollama има нужда от LLAMA_ARG_CACHE_RAM=0 и
+  LLAMA_ARG_CTX_CHECKPOINTS=4 (README, раздел 2.1), иначе може да „замръзне“.
 - Гласовете: TOMO_TTS_VOICE_MALE, TOMO_TTS_VOICE_FEMALE (английски, според
   персонажа) и TOMO_TTS_VOICE_BG (български, за всички). Старата настройка
   TOMO_TTS_VOICE вече не се чете.

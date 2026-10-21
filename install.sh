@@ -23,7 +23,7 @@
 #  Options (environment variables):
 #     TOMO_SKIP_SYSDEPS=1   don't touch system packages
 #     TOMO_SKIP_MODELS=1    don't download the speech and camera models
-#     TOMO_MODEL=qwen3.5:9b the Ollama model to offer
+#     TOMO_MODEL=gemma4:12b-it-qat  the Ollama model to offer
 # =============================================================================
 set -euo pipefail
 
@@ -37,7 +37,7 @@ hr()   { printf "${c_bold}%s${c_reset}\n" "────────────�
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPS_DIR="$HOME/.local/share/applications"
 DATA_DIR="${TOMO_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/tomo}"
-MODEL="${TOMO_MODEL:-qwen3.5:9b}"
+MODEL="${TOMO_MODEL:-gemma4:12b-it-qat}"
 VENV="$ROOT/.venv"
 
 hr
@@ -125,6 +125,16 @@ if command -v ollama >/dev/null 2>&1; then
             warn "Later: ollama pull $MODEL"
         fi
     fi
+    case "$MODEL" in
+        gemma4*)
+            # Without these Ollama keeps saving Gemma 4's state between replies
+            # and can stall for minutes (see the README).
+            warn "For Gemma 4, give Ollama two settings: sudo systemctl edit ollama, add"
+            warn "    [Service]"
+            warn "    Environment=\"LLAMA_ARG_CACHE_RAM=0\" \"LLAMA_ARG_CTX_CHECKPOINTS=4\""
+            warn "then: sudo systemctl restart ollama"
+            ;;
+    esac
 elif command -v lms >/dev/null 2>&1; then
     ok "LM Studio found: start its local server and load a model."
 else

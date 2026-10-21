@@ -311,9 +311,10 @@ def test_an_app_that_isnt_found_comes_back_with_what_to_do_next(tmp_path):
 
 
 def test_it_prefers_tomos_own_model():
-    models = [ModelInfo("gemma4:26b", True, 25.8), ModelInfo("qwen3.5:9b", True, 9.7), ModelInfo("qwen3.5:35b", True, 36)]
-    assert ai.SUGGESTED_MODEL == "qwen3.5:9b" and pick_model(models).name == "qwen3.5:9b"
-    assert pick_model(models[:1]).name == "gemma4:26b"
+    models = [ModelInfo("gemma4:26b", True, 25.8), ModelInfo("qwen3.5:9b", True, 9.7),
+              ModelInfo("gemma4:12b-it-qat", True, 11.9)]
+    assert ai.SUGGESTED_MODEL == "gemma4:12b-it-qat" and pick_model(models).name == "gemma4:12b-it-qat"
+    assert pick_model(models[:2]).name == "gemma4:26b", "without it: the first big enough for tools"
 
 
 def test_the_persona_knows_the_computer_the_character_and_its_voice(tmp_path):
