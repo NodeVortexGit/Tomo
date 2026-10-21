@@ -14,8 +14,10 @@
      отворен — не по-надясно от мястото до него: chat.keep_clear), Animate
      → физиката;
      Emote, Speaking → аниматора; Chat, Thinking, Listening → аниматора и
-     чата; ClickAt, TypeText, ControlMode → управлението; HealthLock,
-     HealthProgress, Pose → заключващия екран;
+     чата; Characters, Transcript, ChatList → чата; Hide → ъгъла;
+     ControlMode → червеният знак и пропускливият прозорец; Carry →
+     управлението (нейната част, докато мозъкът движи курсора);
+     HealthLock, HealthProgress, Pose → заключващия екран;
   2) довършва зареждането на персонаж, ако фоновото четене е готово
      (качване към видеокартата, скелет, Rig, пружинни кости); новият
      персонаж „пада“ отгоре;
