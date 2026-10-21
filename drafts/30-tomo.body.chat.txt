@@ -28,9 +28,18 @@ centre_glyph). Обикновеният бутон на ImGui слага тек�
 отстъп и го центрира само ако се побира — иконите излизаха до 5 px вдясно.
 Остатъкът е до половин пиксел: икона с нечетна ширина не може да е точно в
 средата на бутон с четна ширина, без да се размаже.
-Прозорецът (340 × 460, вдясно, вертикално в средата): заглавие „Tomo“ и
-бутони с икони — персонажи (меню с наличните и „Import a .vrm…“), глас
-(вкл./изкл. → SetVoice), изход (Shutdown), затваряне; историята с
+Прозорецът (340 × 460, вдясно, вертикално в средата): заглавие „Tomo“, до
+него чатовете — нов чат (молив → NewChat; по време на отговор — бележка, че
+ще започне след него) и предишните (часовник → списък под заглавието:
+„New chat“, после чатовете, най-новите отгоре, с кога са използвани —
+„14:05“, „Yesterday“, „12 Oct“, „12 Oct 2025“ (when_said); заглавие,
+съкратено с „…“ (fit); кликване → OpenChat). Вдясно бутони с икони —
+персонажи (меню с наличните и „Import a .vrm…“), скриване в ъгъла (око →
+SetHidden; при скриване се затваря и чатът; когато е скрита — „Come out of
+the corner“), глас (вкл./изкл. → SetVoice), изход (Shutdown), затваряне.
+Transcript сменя целия разговор (друг чат; нов — празен, с бележка в
+средата „A new chat. What Tomo knows about you carries over.“), а ChatList —
+историята. Историята с
 „балончета“ (потребителят вдясно, Tomo вляво, служебните в средата,
 последните 400 реда), „Listening…“ и „Tomo is thinking…“; бутонът 📎,
 полето „Say something…“ с Send и Talk. Историята стои долу, докато идват
@@ -79,17 +88,19 @@ window.set_pointer).
 3. ОСНОВНИ ЕЛЕМЕНТИ
   ChatState — receive, character_clicked, start_opening, keep_clear,
     dismiss, advance, shown, add_images, take_picked, paste, send_message,
-    draw, draw_window, draw_pending, character_menu, bubble, layout,
+    draw, draw_window, draw_pending, character_menu, new_chat, chat_menu,
+    bubble, layout,
     paint_words, copy_button, press, select_text, drag_selection,
     text_menu, text_keys, select_all, copy
   Selection — span, within, place, select, drag_to, clear, lines_dropped
   Row, Placed, wrap, caret_at, char_at, hit, highlight, char_kind, word_at,
-  paragraph_at, selected_text, chat_text
+  paragraph_at, selected_text, chat_text, new_chat_note, when_said, fit
   Phase, panel_rect, dock_x, dock_fraction, pictures, draw_liquid,
   icon_button, centred_icon, centre_glyph,
   pick_files, pick_character_file, pick_images, paste_images, open_file
   DOCK_GAP = 24 px, PENDING_EDGE = 44 px, PICTURE_EDGE = 150 px,
-  COPY_BOX = 16 px, LINE_END_W = 4 px, COPIED_SECS = 1.5 s
+  COPY_BOX = 16 px, LINE_END_W = 4 px, COPIED_SECS = 1.5 s,
+  CHATS_W = 296 px, CHATS_SHOWN = 10
 
 4. ВРЪЗКИ
 Използва: ui, movement (Locomotion), events, platform, attachments.

@@ -10,8 +10,9 @@
 
 2. КАК РАБОТИ
 run_loop() при стартиране:
-  1) отваря паметта (Store в <данни>/chroma) и пренася старата SQLite памет
-     веднъж (db.migrate_from_sqlite);
+  1) отваря паметта (Store в <данни>/chroma), пренася старата SQLite памет
+     веднъж (db.migrate_from_sqlite) и разделя старата обща история на
+     чатове веднъж (db.split_into_chats);
   2) създава изпълнителя на команди (Executor), гласа (Speech — с функция,
      която казва дали показаният персонаж е мъжки или женски:
      characters.voice_of), слушането („Hey Tomo“ — wake.spawn) и здравната
@@ -24,38 +25,66 @@ run_loop() при стартиране:
   5) казва на тялото кой персонаж да покаже (characters.startup), отбелязва
      го като активен в паметта и във фонов режим оставя модела да му избере
      глас, ако още няма (ai.ensure_voice); после списъка с персонажи,
-     последните 20 реплики от чата и Status("ready").
+     дали тя е скрита в ъгъла (Hide — помни се в snapshots), последния
+     използван чат (Transcript — целия, до 400 реда — и ChatList), пуска
+     ChatMemory и Status("ready").
 След това чака съобщения:
   UserMessage     → attach(): копия и метаданни на снимките (ако има,
                     attachments.prepare; нечетима снимка → бележка в чата);
                     после handle_user_text(): връща репликата (със снимките)
-                    в чата, пита модела (ai.respond), записва двете реплики и
-                    показва отговора, пуска гласа във фонов режим (ако е
-                    включен). Съобщение само със снимки е позволено;
+                    в чата, пита модела (ai.respond — с текущия чат),
+                    записва двете реплики в текущия чат и показва отговора,
+                    пуска гласа във фонов режим (ако е включен), после
+                    изпраща обновената история (ChatList). Съобщение само
+                    със снимки е позволено;
+  NewChat         → нов чат (id „chat-<ms>“; записва се едва с първата
+                    реплика): празен Transcript и ChatList; напуснатият чат
+                    отива в ChatMemory;
+  OpenChat(id)    → този чат става текущ: целият му Transcript и ChatList;
+                    напуснатият — в ChatMemory;
+  SetHidden(on)   → помни се (snapshot „hidden“) и Hide(on) към тялото;
   StartVoiceInput → wake.listen() (или бележка, че моделите за реч липсват);
   ImportCharacter → characters.activate(), LoadCharacter към тялото и
                     ai.ensure_voice() във фонов режим (нов персонаж → моделът
                     избира гласа му);
-  PanicStop       → спира разрешението за управление;
+  PanicStop       → спира разрешението за управление (BrainHandle.send го
+                    прави веднага, без да чака хода, защото курсорът се
+                    движи по време на хода);
   SetVoice, SetControlAllowed, Shutdown.
 Езикът на последната реплика (Language.of) се пази, за да брои здравната
 програма на същия език.
+
+ChatMemory: чете чатовете, които потребителят е напуснал — и показания,
+след 5 минути тишина (IDLE_SECS) — за трайни факти за потребителя
+(ai.remember_chat), само когато никой не говори от 20 s (QUIET_SECS), за да
+не чака заявка на потребителя. Всеки чат се чете веднъж до последния си ред
+(db.set_remembered); после — само новото. Неуспешно четене се опитва пак.
+При стартиране чака до 10 непрочетени предишни чата (MEMORY_BACKLOG), а
+останалите — при следващото.
+
+BrainHandle носи и две неща, споделени с тялото: body (hands.BodyState —
+къде са вдигнатите ѝ ръце) и control_allowed (съгласието за мишката).
 
 3. ОСНОВНИ ЕЛЕМЕНТИ
   BrainHandle.send(msg)  — от всяка нишка (call_soon_threadsafe)
   BrainHandle.poll()     — всичко ново от мозъка (queue.SimpleQueue)
   Brain.start(cfg)       — нишката "tomo-brain" (daemon)
-  run_loop, attach, handle_user_text, load_cached_catalog, scan_catalog
-  RESCAN_INTERVAL = 120 s
+  run_loop, attach, handle_user_text, new_chat, show_chat,
+  load_cached_catalog, scan_catalog
+  ChatMemory (.left, .talked, .run, .read)
+  RESCAN_INTERVAL = 120 s, SHOWN_LINES = 400, QUIET_SECS = 20 s,
+  IDLE_SECS = 300 s, MEMORY_BACKLOG = 10
 
 4. ВРЪЗКИ
 Използва: ai, db, commands, speech, wake, health, characters, apps,
-language, events, config.
+language, events, config, hands (BodyState).
 Използва се от: __main__ (и тестовото пускане на цялото приложение).
 
 5. ТЕСТОВЕ
-Частите му са тествани поотделно (test_ai, test_db, test_health…); целият
-цикъл — чрез ръчно стартиране.
+Частите му са тествани поотделно (test_ai, test_db, test_health…);
+ChatMemory чете чат веднъж, после само новото, и опитва пак след неуспех
+(test_ai); целият цикъл — чрез ръчно стартиране. Разделянето на чатове и
+прочитането за факти са проверени и върху копие на истинската памет.
 
 6. ЗА ЕКИПА
 - Нищо в този цикъл не бива да блокира дълго: тежката работа (сканиране,

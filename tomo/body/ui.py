@@ -46,6 +46,10 @@ ICON_PAPERCLIP = ""
 ICON_IMAGE = ""
 ICON_COPY = ""
 ICON_CHECK = ""
+ICON_NEW_CHAT = ""
+ICON_HISTORY = ""
+ICON_HIDE = ""
+ICON_SHOW = ""
 
 VERTEX = """#version 330 core
 uniform mat4 u_proj;

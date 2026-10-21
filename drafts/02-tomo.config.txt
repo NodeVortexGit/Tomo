@@ -26,7 +26,9 @@ python-dotenv зарежда .env, без да презаписва вече з�
                        persona_name, character_path,
                        data_dir, audit_log_path, scripts_dir, assets_dir,
                        allow_command_execution, extra_allowed_commands,
-                       allow_screen, wake_word, embeddings ("ngram").
+                       allow_screen, use_mouse (TOMO_USE_MOUSE: дали Tomo отваря и затваря
+                       приложения с мишката, пред очите на потребителя),
+                       wake_word, embeddings ("ngram").
   Config.load(root)     — чете всичко.
   Config.for_tests(root) — всичко в тестова папка, нищо от средата.
   Config.redacted()     — текст за журнала (без API ключа).

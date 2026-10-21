@@ -37,7 +37,7 @@ from .. import platform
 log = logging.getLogger(__name__)
 
 IDLE_FPS = 24  # at rest; while anything moves, the display's rate
-WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW = 0x00080000, 0x00000080, 0x00040000
+WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_APPWINDOW, WS_EX_TRANSPARENT = 0x00080000, 0x00000080, 0x00040000, 0x20
 GWL_EXSTYLE, LWA_COLORKEY = -20, 0x1
 HWND_TOPMOST = -1
 SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SWP_NOACTIVATE = 0x2, 0x1, 0x40, 0x10
@@ -175,6 +175,7 @@ class Window:
         self.frame_started = time.perf_counter()
         self.pointer: int | None = None  # the pointer's shape (None: the arrow)
         self.pointers: dict[int, object] = {}
+        self.through = False  # every click goes through to what's below
 
     # ---- geometry -------------------------------------------------------------------------
 
@@ -238,6 +239,12 @@ class Window:
     def cursor(self) -> tuple[float, float]:
         return self.to_logical(*glfw.get_cursor_pos(self.handle))
 
+    def to_screen(self, x: float, y: float) -> tuple[float, float]:
+        """The window's logical pixels → the screen's, as the cursor counts them."""
+        wx, wy = glfw.get_window_pos(self.handle)
+        s = self.scale()
+        return wx + x * s, wy + y * s
+
     def screen_to_logical(self, x: float, y: float) -> tuple[float, float]:
         """A screen pixel (as the screenshots count them: from the whole
         desktop's corner) → the window's logical pixels."""
@@ -269,10 +276,30 @@ class Window:
         where the pointer is once it's let through, so there it stays)."""
         if not self.x11 or self.covering:
             wanted = True
+        elif self.through:
+            wanted = False
         if self.passthrough == (not wanted):
             return
         self.passthrough = not wanted
         glfw.set_window_attrib(self.handle, glfw.MOUSE_PASSTHROUGH, self.passthrough)
+
+    def click_through(self, on: bool) -> None:
+        """Let every click through the window to the apps below — even over
+        her or the chat — while she uses the mouse herself, so hers land
+        where she aims them."""
+        if on == self.through:
+            return
+        self.through = on
+        if platform.WINDOWS:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            hwnd = glfw.get_win32_window(self.handle)
+            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            style = style | WS_EX_TRANSPARENT if on else style & ~WS_EX_TRANSPARENT
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style)
+        else:
+            self.set_mouse_wanted(not on)
 
     def set_pointer(self, shape: int | None) -> None:
         """The pointer's shape over the window: one of GLFW's standard ones

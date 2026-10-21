@@ -2,6 +2,7 @@
 the lock screen's geometry, the chat's state machine, control, the session."""
 
 import math
+import time
 from pathlib import Path
 
 import numpy as np
@@ -14,8 +15,8 @@ from tomo.body.animation import Animator, Bone, Rig, animate_face, mirror_pose, 
 from tomo.body.chat import (DOCK_GAP, LINE_END_W, ChatState, Phase, Placed, Selection, caret_at, centre_glyph, char_at,
                             chat_text, dock_fraction, dock_x, highlight, hit, panel_rect, paragraph_at, selected_text,
                             word_at, wrap)
-from tomo.body.control import Control
-from tomo.body.mathx import IDENTITY, Vec2, qmul, qrot
+from tomo.body.control import HANDS_UP, Control
+from tomo.body.mathx import IDENTITY, Vec2, qmul, qrot, rz
 from tomo.body.movement import Locomotion, Stance, body_size
 from tomo.body.skeleton import Skeleton
 from tomo.body.window import Desktop, DisplayServer, detect_desktop, detect_server
@@ -313,6 +314,34 @@ def test_the_transcript_keeps_the_last_lines():
     assert len(chat.transcript) == 400 and chat.transcript[-1].text == "line 449"
 
 
+def test_another_chat_replaces_the_transcript_and_the_history_follows():
+    from tomo.events import ChatInfo
+
+    chat = ChatState()
+    chat.receive(events.Chat(ChatLine(Role.USER, "old words")), None)
+    chat.selection.select((0, 0), (0, 3))
+    chat.receive(events.Transcript(()), None)
+    assert chat.transcript == [] and chat.selection.span() is None, "a new chat: empty"
+    lines = tuple(ChatLine(Role.USER, f"line {i}") for i in range(450))
+    chat.receive(events.Transcript(lines), None)
+    assert len(chat.transcript) == 400 and chat.transcript[-1].text == "line 449" and chat.scroll_to_end
+    info = ChatInfo("a", "Open Chrome", 1, 2, 3)
+    chat.receive(events.ChatList((info,), "a"), None)
+    assert chat.chats == [info] and chat.current_chat == "a"
+
+
+def test_a_chat_says_when_it_was_used_in_few_words():
+    from tomo.body.chat import fit, when_said
+
+    now = time.mktime((2026, 10, 21, 15, 30, 0, 0, 0, -1))
+    assert when_said(int(time.mktime((2026, 10, 21, 9, 5, 0, 0, 0, -1)) * 1000), now) == "09:05"
+    assert when_said(int(time.mktime((2026, 10, 20, 23, 0, 0, 0, 0, -1)) * 1000), now) == "Yesterday"
+    assert when_said(int(time.mktime((2026, 9, 3, 12, 0, 0, 0, 0, -1)) * 1000), now) == "3 Sep"
+    assert when_said(int(time.mktime((2025, 12, 31, 12, 0, 0, 0, 0, -1)) * 1000), now) == "31 Dec 2025"
+    assert fit("Open Chrome and tell me", 12.0, len) == "Open Chrome…"
+    assert fit("short", 12.0, len) == "short"
+
+
 def mono(_):
     return 1.0  # every character one unit wide
 
@@ -481,29 +510,62 @@ def test_a_pasted_picture_or_copied_files_are_attached(tmp_path, monkeypatch):
 # ---- control -------------------------------------------------------------------------------------
 
 
-def test_a_click_waits_until_she_has_walked_over(monkeypatch):
-    clicks = []
-    monkeypatch.setattr("tomo.body.control.click", lambda x, y, double: clicks.append((x, y, double)))
-    control, loco = Control(), settled(300.0)
-    loco.arena = Vec2(1920, 1080)
-    control.receive(events.ClickAt(1500.0, 400.0, True), loco, lambda x, y: (x, y))
-    assert control.active and loco.held and control.pending
-    control.update(loco)
-    assert clicks == [], "not before she's there"
-    for _ in range(900):
-        loco.step(1 / 60, Vec2(1920, 1080), Vec2(80, 320))
-        control.update(loco)
-    assert clicks == [(1500.0, 400.0, True)]
-    assert not control.active and not loco.held
+def test_she_reaches_for_the_cursor_hangs_from_it_and_lets_go():
+    control, loco, arena = Control(), settled(300.0), Vec2(1920, 1080)
+    loco.step(1 / 60, arena, body_size(320))
+    control.receive(events.Carry("reach"), loco)
+    assert loco.held and control.hands(loco) is None, "her arms go up first"
+    control.update(loco, Vec2(), 0.5)
+    hands = control.hands(loco)
+    assert hands == loco.com + Vec2(0.0, -HANDS_UP * 320.0)
+    # The cursor came into her hands; now it flies up and right, and she hangs from it.
+    control.receive(events.Carry("hold"), loco)
+    for i in range(1, 61):
+        cursor = hands.lerp(Vec2(1500.0, 200.0), i / 60)
+        control.update(loco, cursor, 1 / 60)
+        loco.step(1 / 60, arena, body_size(320))
+    assert loco.carried() and loco.com.y > cursor.y and abs(loco.com.x - cursor.x) < 200.0
+    control.receive(events.Carry("drop"), loco)
+    assert loco.stance == Stance.FLYING and not loco.held and not control.carrying, "she drops"
+    for _ in range(300):
+        loco.step(1 / 60, arena, body_size(320))
+    assert loco.grounded()
 
 
 def test_the_panic_key_releases_control():
     sent = []
-    control, loco = Control(active=True, pending=(1.0, 2.0, False)), settled()
+    control, loco = Control(active=True, carrying="hold"), settled()
     loco.held = True
+    loco.drag_to(loco.com, 1 / 60)
     control.panic(loco, sent.append)
-    assert not control.active and control.pending is None and not loco.held
+    assert not control.active and not control.carrying and not loco.held and not loco.carried()
     assert isinstance(sent[0], events.PanicStop)
+
+
+def test_she_raises_both_arms_for_the_cursor():
+    loco = settled()
+    up = target_pose(Animator(holding=True), loco, 0.0, IDENTITY, False, 0.0)
+    down = target_pose(Animator(), loco, 0.0, IDENTITY, False, 0.0)
+    for bone, angle in ((Bone.LEFT_UPPER_ARM, 70.0), (Bone.RIGHT_UPPER_ARM, -70.0)):
+        assert np.allclose(up[bone], rz(angle)) and not np.allclose(down[bone], rz(angle))
+
+
+def test_hidden_she_peeks_from_the_corner_and_comes_out_for_the_chat():
+    from tomo.body.app import SINK, Corner
+
+    corner, loco, arena = Corner(wanted=True), settled(300.0), Vec2(1920, 1080)
+    for _ in range(1200):
+        busy = corner.update(1 / 60, loco, out=False)
+        loco.step(1 / 60, arena, body_size(320))
+    assert corner.depth == 1.0 and corner.drop() == pytest.approx(SINK) and loco.held and not busy
+    assert abs(loco.feet(320).x - (1920 - body_size(320).x)) < 3.0, "in the bottom-right corner"
+    for _ in range(60):  # the chat opens: up she comes, and the chat has her
+        corner.update(1 / 60, loco, out=True)
+    assert corner.depth == 0.0 and loco.held
+    corner.wanted = False  # "come out"
+    corner.update(1 / 60, loco, out=False)
+    corner.update(1 / 60, loco, out=False)
+    assert corner.depth == 0.0 and not corner.tucked
 
 
 # ---- the desktop session -------------------------------------------------------------------------

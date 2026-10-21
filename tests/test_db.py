@@ -50,6 +50,56 @@ def test_messages_return_in_order(store):
     assert recent[0].role == Role.ASSISTANT
 
 
+def test_each_chat_keeps_its_own_lines_and_the_history_lists_them(store):
+    store.add_message(ChatLine(Role.USER, "Open Chrome   and\ntell me the time", 1000), "a")
+    store.add_message(ChatLine(Role.ASSISTANT, "Done.", 1001), "a")
+    store.add_message(ChatLine(Role.USER, "", 2000, (Attachment("x.png", "", ""),)), "b")  # a picture first
+    store.add_message(ChatLine(Role.USER, "What's in it?", 2001), "b")
+    store.add_message(ChatLine(Role.USER, "x" * 80, 3000), "c")
+    assert [c.id for c in store.list_chats()] == ["c", "b", "a"], "the latest first"
+    a = next(c for c in store.list_chats() if c.id == "a")
+    assert (a.title, a.started_at, a.updated_at, a.count) == ("Open Chrome and tell me the time", 1000, 1001, 2)
+    assert next(c for c in store.list_chats() if c.id == "b").title == "A picture"
+    assert next(c for c in store.list_chats() if c.id == "c").title == "x" * 59 + "…"
+    assert [m.text for m in store.recent_messages(5, "a")] == ["Open Chrome   and\ntell me the time", "Done."]
+    assert [m.text for m in store.recent_messages(1, "a")] == ["Done."]
+    lines, last = store.chat_lines("b")
+    assert [m.text for m in lines] == ["", "What's in it?"] and lines[0].attachments
+    after, _ = store.chat_lines("b", store.remembered("b"))
+    assert len(after) == 2, "the memory hasn't read it yet"
+    store.set_remembered("b", last)
+    assert store.chat_lines("b", store.remembered("b"))[0] == []
+    assert store.recent_messages(5, "new") == []
+
+
+def test_the_old_single_transcript_becomes_chats_once(store):
+    hour = 3600 * 1000
+    for i, at in enumerate([0, 60_000, 4 * hour, 4 * hour + 1, 9 * hour]):
+        store.add_message(ChatLine(Role.USER if i % 2 == 0 else Role.ASSISTANT, f"line {i}", at))
+    assert store.split_into_chats() == 3, "a new chat after each pause of over three hours"
+    chats = store.list_chats()
+    assert [(c.title, c.count) for c in chats] == [("line 4", 1), ("line 2", 2), ("line 0", 2)]
+    assert [m.text for m in store.recent_messages(9, chats[1].id)] == ["line 2", "line 3"]
+    assert store.split_into_chats() == 0, "once"
+
+
+def test_lines_from_every_chat_are_found_by_their_words(store):
+    store.add_message(ChatLine(Role.USER, "My dog Sharo loves the park", 1), "a")
+    store.add_message(ChatLine(Role.USER, "Кучето ми се казва Шаро", 2), "b")
+    store.add_message(ChatLine(Role.USER, "Open Word", 3), "b")
+    found = store.search_messages("what's my dog called? Sharo", 5)
+    assert [(line.text, chat) for line, chat in found] == [("My dog Sharo loves the park", "a")]
+    assert [line.text for line, _ in store.search_messages("куче", 5)] == ["Кучето ми се казва Шаро"], "word forms"
+    assert store.search_messages("a", 5) == [], "no words worth looking for"
+
+
+def test_a_memory_said_again_is_known(store):
+    store.add_memory("fact", "The user's dog is called Sharo.", 2)
+    assert store.knows("the user's dog is called sharo.")
+    assert store.knows("The user's dog is called Sharo")
+    assert not store.knows("The user studies in Sofia.")
+
+
 def test_only_one_character_is_active(store):
     store.add_character("Tomo", "/c/tomo.vrm")
     store.add_character("Kiyotaka Ayanokōji", "/c/k.vrm")

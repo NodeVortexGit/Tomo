@@ -5,9 +5,12 @@ physics, the pose, the drawing.
 
 1. drain the brain's messages and hand each to whoever acts on it;
 2. finish loading a character, if one was being read in the background;
-3. the mouse: pick her up, throw her, click her (opens the chat);
+3. the mouse: pick her up, throw her, click her (opens the chat),
+   right-click her (a menu: the chat, hiding in the corner);
 4. her physics, idle life, the chat's animation, pictures dropped on her or
-   the chat (or pasted into it), a pending real click;
+   the chat (or pasted into it); hidden, her corner (:class:`Corner`); and
+   her part when she uses the mouse herself — reaching for the cursor and
+   hanging from it (control.py) — telling the brain where her hands are;
 5. place her on screen — or, during a health round, big in the middle as
    the user's mirror — then pose her bones and face and swing her hair;
 6. draw her, then the interface (chat, lock screen card, control badge),
@@ -32,13 +35,13 @@ from imgui_bundle import imgui
 
 from .. import events
 from ..brain import BrainHandle
-from ..events import Shutdown
+from ..events import SetHidden, Shutdown
 from . import vrm
 from .animation import Animator, Rig, animate_face, pose_body
 from .chat import ChatState, Phase
 from .control import Control, panic_pressed_anywhere
 from .mathx import IDENTITY, Quat, Vec2, compose, qmul, qslerp, qaxis
-from .movement import (CROUCH_DROP, DRAG_THRESHOLD, SIT_DROP, TURN_RATE, Locomotion, body_size)
+from .movement import (CROUCH_DROP, DRAG_THRESHOLD, SIT_DROP, TURN_RATE, Locomotion, Stance, approach, body_size)
 from .renderer import Renderer, View
 from .skeleton import Skeleton
 from .springs import SpringSpec, Springs
@@ -52,6 +55,10 @@ HEIGHT_PX = 320.0  # her height on screen, logical px
 MIRROR_HEIGHT = 0.62  # her height while she mirrors the user, a share of the screen's
 LEG_SHARE = 0.48  # the legs' share of her height: how far she comes down with the user's hips
 GRAB_MARGIN = 4.0  # px around her box that still catch the mouse
+# Hidden in the corner, she sinks this far below the screen's edge (a share
+# of her height) — her head peeks over it — taking this long to go down…
+SINK, SINK_SECS = 0.8, 0.7
+RISE_SECS = 0.35  # …and this long to come back up
 
 KEYS = {
     glfw.KEY_TAB: imgui.Key.tab, glfw.KEY_LEFT: imgui.Key.left_arrow, glfw.KEY_RIGHT: imgui.Key.right_arrow,
@@ -93,10 +100,45 @@ class Grab:
 
 
 @dataclass
+class Corner:
+    """Hiding in the corner: she walks to the bottom-right corner and sinks
+    behind the screen's edge until only her head peeks over it, out of the
+    way. The chat, a task, or being picked up brings her out; then she goes
+    back. ``wanted`` is the user's choice, which the brain keeps."""
+
+    wanted: bool = False
+    depth: float = 0.0  # 0 out … 1 sunk
+    tucked: bool = False  # in the corner right now, not out for something
+
+    def update(self, dt: float, loco: Locomotion, out: bool) -> bool:
+        """Toward the corner and down, or back up. True while she moves."""
+        tuck = self.wanted and not out
+        if self.tucked and not tuck and not self.wanted:
+            loco.held = False  # free to wander again
+        self.tucked = tuck
+        at_corner = False
+        if tuck:
+            loco.held = True  # no wandering out of the corner
+            right = loco.arena.x - body_size(loco.height).x
+            at_corner = loco.stance == Stance.STANDING and abs(loco.feet(loco.height).x - right) < 3.0
+            if not at_corner and loco.target is None:
+                loco.walk_to(1.0)
+        goal = 1.0 if at_corner and loco.is_idle() else 0.0
+        self.depth = approach(self.depth, goal, dt / (SINK_SECS if goal > self.depth else RISE_SECS))
+        return 0.0 < self.depth < 1.0 or (tuck and not at_corner)
+
+    def drop(self) -> float:
+        """How far below the floor to show her, a share of her height."""
+        d = self.depth
+        return SINK * d * d * (3.0 - 2.0 * d)
+
+
+@dataclass
 class Frame:
     """This frame's input, from the window's callbacks."""
 
     presses: list[Vec2] = field(default_factory=list)  # left button went down here
+    right_presses: list[Vec2] = field(default_factory=list)  # …the right button
     escape: bool = False
     panic: bool = False
     dropped: list[str] = field(default_factory=list)  # files dropped on her or the chat
@@ -120,6 +162,8 @@ class App:
         self.chat = ChatState()
         self.workout = Workout()
         self.control = Control()
+        self.corner = Corner()
+        self.her_menu = False  # a right-click on her: open her menu this frame
         self.keyboard = KeyboardHold()
         self.grab = Grab()
         self.frame_input = Frame()
@@ -146,6 +190,8 @@ class App:
             self.ui.mouse_button(button, down)
             if button == glfw.MOUSE_BUTTON_LEFT and down:
                 self.frame_input.presses.append(Vec2(*self.window.cursor()))
+            elif button == glfw.MOUSE_BUTTON_RIGHT and down:
+                self.frame_input.right_presses.append(Vec2(*self.window.cursor()))
 
         def on_scroll(_, dx, dy):
             self.ui.scrolled(dx, dy)
@@ -212,10 +258,15 @@ class App:
         elif isinstance(event, (events.Thinking, events.Listening, events.Chat)):
             self.animator.cue(event)
             self.chat.receive(event, loco)
-        elif isinstance(event, events.Characters):
+        elif isinstance(event, (events.Characters, events.Transcript, events.ChatList)):
             self.chat.receive(event, loco)
-        elif isinstance(event, (events.ClickAt, events.TypeText, events.ControlMode)):
-            self.control.receive(event, loco, self.window.screen_to_logical)
+        elif isinstance(event, events.Hide):
+            self.corner.wanted = self.chat.hidden = event.on
+        elif isinstance(event, events.ControlMode):
+            self.control.receive(event, loco)
+            self.window.click_through(event.on)  # her clicks go to the apps, even under her
+        elif isinstance(event, events.Carry):
+            self.control.receive(event, loco)
         elif isinstance(event, (events.HealthLock, events.HealthProgress, events.Pose)):
             if self.workout.receive(event):
                 self.keyboard.set(self.workout.locked)
@@ -303,11 +354,13 @@ class App:
 
         if frame_input.panic or (self.control.active and panic_pressed_anywhere()):
             self.control.panic(self.loco, self.brain.send)
+            self.window.click_through(False)
         if locked:
             self.window.keep_in_front()
             busy = True  # mirror at the display's rate
         elif c is not None:
             self.pointer(frame_input, dt)
+            self.control.update(self.loco, Vec2(*self.window.cursor()), dt)
             self.loco.step(dt, arena, body_size(HEIGHT_PX))
             self.loco.wander(dt)
             c.facing = self.loco.facing()
@@ -319,7 +372,18 @@ class App:
             self.pictures(frame_input)
             busy |= self.chat.advance(dt, self.loco if c else None)
             busy |= self.chat.selection.dragging  # scrolling as it selects past the edge
-        self.control.update(self.loco if c else None)
+            if c is not None:
+                # Out of her corner for the chat, a task, or in the user's hands.
+                out = (self.chat.phase != Phase.CLOSED or bool(self.control.carrying) or self.control.active
+                       or self.grab.pressed_at is not None or not self.loco.grounded())
+                busy |= self.corner.update(dt, self.loco, out)
+                if any(inside(c.screen_rect, p) for p in frame_input.right_presses) and not self.ui.wants_mouse():
+                    self.her_menu = True
+        # Her part in using the mouse: where her hands are, for the brain.
+        hands = self.control.hands(self.loco if c else None)
+        self.brain.body.hands = self.window.to_screen(hands.x, hands.y) if hands is not None else None
+        self.animator.holding = bool(self.control.carrying)
+        busy |= bool(self.control.carrying)
 
         if c is not None:
             self.place(c, arena, dt)
@@ -348,6 +412,7 @@ class App:
                 source = ((r[0] + r[2]) * 0.5, (r[1] + r[3]) * 0.5)
             if self.chat.draw(self.ui, width, height, source, c.path if c else None, self.brain.send):
                 self.running = False
+            self.draw_her_menu()
         self.workout.draw(self.ui, width)
         self.control.draw_badge(width)
         self.ui.end()
@@ -365,10 +430,28 @@ class App:
         if frame_input.paste and self.chat.phase == Phase.OPEN:
             self.chat.paste()
 
+    def draw_her_menu(self) -> None:
+        """A right-click on her: the chat, and hiding in the corner (or
+        coming out)."""
+        if self.her_menu:
+            imgui.open_popup("her-menu")
+            self.her_menu = False
+        if not imgui.begin_popup("her-menu"):
+            return
+        if imgui.menu_item("Close the chat" if self.chat.phase == Phase.OPEN else "Chat", "", False)[0]:
+            self.chat.character_clicked(self.loco)
+        hide = "Come out of the corner" if self.corner.wanted else "Hide in the corner"
+        if imgui.menu_item(hide, "", False)[0]:
+            self.brain.send(SetHidden(not self.corner.wanted))
+        imgui.end_popup()
+
     def pointer(self, frame_input: Frame, dt: float) -> None:
         """Press on her and move to pick her up — she hangs from where she was
         grabbed — and let go to throw her. A press that doesn't move is a
         click: it opens (or closes) the chat."""
+        if self.control.carrying:  # the cursor has her
+            self.grab = Grab()
+            return
         c = self.character
         cursor = Vec2(*self.window.cursor())
         for press in frame_input.presses:
@@ -408,7 +491,7 @@ class App:
             return
         turn = qaxis((0.0, 1.0, 0.0), c.facing * math.pi / 2)
         c.yaw = qslerp(c.yaw, turn, min(TURN_RATE * dt, 1.0))
-        sink = (self.loco.limbs.crouch.x * CROUCH_DROP + self.loco.seat * SIT_DROP) * HEIGHT_PX
+        sink = (self.loco.limbs.crouch.x * CROUCH_DROP + self.loco.seat * SIT_DROP + self.corner.drop()) * HEIGHT_PX
         feet = self.loco.feet(HEIGHT_PX) + Vec2(0.0, sink)
         s = HEIGHT_PX / model_height
         rotation = qmul(qaxis((0.0, 0.0, 1.0), self.loco.angle), c.yaw)

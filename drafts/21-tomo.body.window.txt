@@ -29,6 +29,11 @@ Tomo трябва да плава над работния плот, без да 
   курсора; screen_to_logical() — пиксел от екранна снимка → прозореца.
   finish_frame(busy): показва кадъра; в покой чака (wait_events_timeout),
   така че кадрите са до 24 в секунда, но входът остава бърз.
+  click_through(on): докато Tomo използва мишката, прозорецът пропуска
+  всички кликвания към приложенията отдолу — дори над нея и над чата — за да
+  стигнат кликванията ѝ там, където ги цели (Windows: WS_EX_TRANSPARENT;
+  X11: MOUSE_PASSTHROUGH). to_screen(x, y): логически пиксели → пиксели на
+  екрана, както ги брои курсорът.
   set_pointer(shape): формата на курсора над прозореца — стандартен курсор
   на GLFW (I-образен над текст, ръка) или None за стрелката; курсорите се
   създават веднъж и се пазят.
@@ -40,7 +45,8 @@ Sway) — за бележки в журнала.
 3. ОСНОВНИ ЕЛЕМЕНТИ
   Window(session) — work_area, whole_desktop, scale, framebuffer,
     logical_size, to_logical, cursor, screen_to_logical, set_mouse_wanted,
-    set_pointer, cover, keep_in_front, push_front, should_close,
+    set_pointer, click_through, to_screen, cover, keep_in_front,
+    push_front, should_close,
     finish_frame, close
   Session, DisplayServer, Desktop, detect_server, detect_desktop
   IDLE_FPS = 24

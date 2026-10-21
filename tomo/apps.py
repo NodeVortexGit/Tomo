@@ -393,6 +393,17 @@ def launched_program(exec_: str) -> str | None:
     return path.lower() if path.lower().endswith(".exe") else None
 
 
+def running_program(app: DesktopApp) -> str:
+    """The name of the program that runs while ``app`` is open, where it's
+    known without asking the system: "chrome" for Chrome's shortcut, a Steam
+    game's own; "" for a Store app (whose manifest names it)."""
+    if not platform.WINDOWS:
+        words = app.exec.split()
+        return Path(words[0]).name if words else ""
+    exe = app.program or launched_program(app.exec) or ""
+    return "" if exe.startswith("steam://") else Path(exe.replace("\\", "/")).stem
+
+
 def shortcut_target(path: Path) -> str | None:
     """The file a .lnk shortcut opens, from its link info; None when it
     names none (an installer's "advertised" shortcuts don't)."""
@@ -769,17 +780,28 @@ def checked_launch(exec_: str, program: str = "") -> str:
     names (a Store app's window belongs to a host process, so its window
     can't tell). If none can be worked out, a window that has opened since
     the launch counts. An app that was open already counts as open."""
+    return _confirmed("$started = Get-Date; ", exec_, program, start=True)
+
+
+def confirm_open(exec_: str, program: str = "", since: float = 0.0) -> str:
+    """The same check without starting it: the app was started some other
+    way (through the Start menu) up to ``since`` seconds ago."""
+    return _confirmed(f"$started = (Get-Date).AddSeconds(-{since:.0f}); ", exec_, program, start=False)
+
+
+def _confirmed(started: str, exec_: str, program: str, start: bool) -> str:
     wait = GAME_WAIT_SECS if "steam://" in exec_ else LAUNCH_WAIT_SECS
     program = "'" + program.replace("'", "''") + "'" if program else program_of(exec_)
     return (
-        f"$started = Get-Date; $program = @({program})[0]; {exec_}; "
+        f"{started}$program = @({program})[0]; {exec_ + '; ' if start else ''}"
+        f"$until = (Get-Date).AddSeconds({wait}); "
         "$look = { Get-Process -ErrorAction SilentlyContinue | Where-Object { try { if ($program) { "
         "$_.ProcessName -eq $program } else { $_.MainWindowHandle -ne 0 -and $_.StartTime -ge $started } } "
         "catch { $false } } | Sort-Object { $_.MainWindowHandle -eq 0 } | Select-Object -First 1 }; "
         "do { $found = & $look; if ($found) { "
         f"Start-Sleep -Milliseconds {LAUNCH_STAYS_MS}; $found = & $look; if ($found) {{ break }} }} "
         f"else {{ Start-Sleep -Milliseconds {LAUNCH_LOOK_MS} }} }} "
-        f"while ((Get-Date) -lt $started.AddSeconds({wait})); "
+        "while ((Get-Date) -lt $until); "
         "if ($found) { 'OPEN: ' + $found.ProcessName + ' is running' + "
         "$(if ($found.MainWindowTitle) { ', window: ' + $found.MainWindowTitle } else { '' }) } "
         f"else {{ 'NOT CONFIRMED: it did not open (its program is not running {wait} s after the start)' }}"

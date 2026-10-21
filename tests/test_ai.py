@@ -8,16 +8,18 @@ import pytest
 from PIL import Image
 from vrms import png, tiny_vrm
 
-from tomo import ai, characters, sysinfo
+from tomo import ai, characters, desktop, sysinfo
 from tomo.ai import (ACT_NOW, CHECK_RESULTS, AiClient, Api, ModelInfo, Msg, SharedCatalog, ToolCall, action_failed,
                      billions, calls_in_text, claims_success, conversation, ollama_request, only_promises,
                      openai_request, parse_ollama, parse_openai, pick_model, server_candidates, tidy, tool_names,
                      tool_specs, without_thinking)
 from tomo.apps import DesktopApp, SystemCatalog
-from tomo.commands import Executor
+from tomo.commands import CommandOutcome, Executor
 from tomo.config import Config, LlmProvider
 from tomo.db import Store
-from tomo.events import Animate, Attachment, Chat, ChatLine, Role
+from tomo.desktop import AppWindow
+from tomo.events import Animate, Attachment, Carry, Chat, ChatLine, Hide, Role
+from tomo.hands import BodyState
 from tomo.language import Language
 
 
@@ -412,3 +414,197 @@ def test_a_voice_answered_in_words_counts_and_no_answer_keeps_the_default(tmp_pa
     ai_client = client(tmp_path / "2", voice_server({"message": {"role": "assistant", "content": "Hard to say."}}))
     assert asyncio.run(ai_client.choose_voice("Ayako", vrm)) is None
     assert characters.voice_of(ai_client.db) == ""
+
+
+# ---- opening and closing apps with the mouse, faked -------------------------------------------------
+
+
+class FakeExecutor:
+    """Runs nothing: each command line gets ``answer(line)`` as its output."""
+
+    def __init__(self, answer):
+        self.answer, self.lines = answer, []
+
+    async def run(self, command):
+        self.lines.append(command)
+        return CommandOutcome(command, True, exit_code=0, stdout=self.answer(command))
+
+
+@pytest.fixture
+def screen(monkeypatch, mouse):
+    """A desktop to open and close apps on: windows that close when their
+    close button is clicked (or they're asked to), and a Start menu."""
+    from tomo import hands
+
+    state = {"windows": [], "closed": set(), "asked": [], "stubborn": set(), "start_open": True}
+
+    def click(times=1):
+        mouse["clicks"] += times
+        for w in state["windows"]:
+            if mouse["at"] == (w.handle * 100, 10) and w.handle not in state["stubborn"]:
+                state["closed"].add(w.handle)
+
+    def ask(window):
+        state["asked"].append(window.handle)
+        state["closed"].add(window.handle)
+
+    monkeypatch.setattr(hands, "click", click)
+    monkeypatch.setattr(desktop, "open_windows", lambda: [w for w in state["windows"] if w.handle not in state["closed"]])
+    monkeypatch.setattr(desktop, "bring_forward", lambda window: None)
+    monkeypatch.setattr(desktop, "close_button", lambda window: (window.handle * 100, 10) if window.handle < 9 else None)
+    monkeypatch.setattr(desktop, "corner", lambda window: (window.handle * 100 - 3, 15))
+    monkeypatch.setattr(desktop, "shows_at", lambda window, x, y: True)
+    monkeypatch.setattr(desktop, "ask_to_close", ask)
+    monkeypatch.setattr(desktop, "is_open", lambda window: window.handle not in state["closed"])
+    monkeypatch.setattr(desktop, "dialog_of", lambda window: "Save changes?" if window.handle in state["stubborn"] else None)
+    monkeypatch.setattr(desktop, "start_button", lambda: (600, 1050))
+    monkeypatch.setattr(desktop, "start_menu_open", lambda: state["start_open"])
+    monkeypatch.setattr(ai.platform, "WINDOWS", True)  # windows with close buttons
+    monkeypatch.setattr(ai, "CLOSE_WAIT_SECS", 0.1)
+    monkeypatch.setattr(ai, "START_SEARCH_SECS", 0.0)
+    monkeypatch.setattr(ai, "START_OPENS_SECS", 0.1)
+    return state
+
+
+def ignore(event):
+    pass
+
+
+def hands_on(tmp_path, answer=lambda line: "exit=0"):
+    """A client whose mouse she may use, with a catalogue of apps."""
+    ai_client = client(tmp_path, FakeServer([]))
+    ai_client.control_allowed.set()
+    ai_client.executor = FakeExecutor(answer)
+    ai_client.catalog.set(SystemCatalog([
+        DesktopApp("google chrome", "Google Chrome", r"Start-Process -FilePath 'C:\x\Google Chrome.lnk'",
+                   source="start menu", program="chrome"),
+        DesktopApp("calculator", "Calculator", r"Start-Process 'shell:AppsFolder\Microsoft.WindowsCalculator!App'",
+                   source="apps folder"),
+        DesktopApp("upscayl", "Upscayl", r"Start-Process -FilePath 'C:\Program Files\Upscayl\Upscayl.exe'",
+                   source="installed")]))
+    return ai_client
+
+
+def test_closing_an_app_clicks_each_of_its_windows_close_button(tmp_path, screen, mouse):
+    screen["windows"] = [AppWindow(1, "Docs - Google Chrome", "chrome"), AppWindow(2, "Mail - Google Chrome", "chrome"),
+                         AppWindow(3, "Calculator", "CalculatorApp", True)]
+    client_, cues = hands_on(tmp_path), []
+    body = client_.body = BodyState()
+
+    def ui(event):  # the body: she stands and raises her arms for the cursor
+        cues.append(event)
+        if event == Carry("reach"):
+            body.hands = (5.0, 900.0)
+
+    result = asyncio.run(client_.dispatch_tool("close_app", {"name": "chrome"}, ui))
+    assert result == "CLOSED: Google Chrome (2 windows)" and not action_failed(result)
+    assert mouse["clicks"] == 2 and screen["closed"] == {1, 2} and screen["asked"] == [], "clicked, not asked"
+    assert cues.count(Carry("reach")) == 2, "she carries the cursor to each"
+
+
+def test_a_window_that_stays_open_is_left_and_reported(tmp_path, screen, mouse):
+    screen["windows"] = [AppWindow(3, "Calculator", "CalculatorApp", True), AppWindow(9, "Untitled - Notepad", "notepad")]
+    screen["stubborn"] = {3}
+    client_ = hands_on(tmp_path)
+    result = asyncio.run(client_.dispatch_tool("close_app", {"name": "Calculator"}, ignore))
+    assert action_failed(result) and "“Calculator” is asking “Save changes?”" in result and "don't force" in result
+    # A window that doesn't say where its close button is: the cursor goes to
+    # the corner, and the window is asked to close as the button would.
+    result = asyncio.run(client_.dispatch_tool("close_app", {"name": "notepad"}, ignore))
+    assert result.startswith("CLOSED") and screen["asked"] == [9] and mouse["moves"][-1] == (897, 15)
+    assert asyncio.run(client_.dispatch_tool("close_app", {"name": "Word"}, ignore)).startswith("NOT OPEN")
+
+
+def test_without_consent_windows_are_still_asked_to_close(tmp_path, screen, mouse):
+    screen["windows"] = [AppWindow(1, "Docs - Google Chrome", "chrome")]
+    client_ = hands_on(tmp_path)
+    client_.control_allowed.clear()
+    assert asyncio.run(client_.dispatch_tool("close_app", {"name": "Google Chrome"}, ignore)).startswith("CLOSED")
+    assert mouse["moves"] == [] and screen["asked"] == [1]
+
+
+def test_an_app_opens_through_the_start_menu(tmp_path, screen, mouse, monkeypatch):
+    monkeypatch.setattr(ai.platform, "WINDOWS", True)
+    client_ = hands_on(tmp_path, lambda line: "OPEN: CalculatorApp is running, window: Calculator")
+    cues = []
+    result = asyncio.run(client_.dispatch_tool("open_app", {"name": "calculator"}, cues.append))
+    assert "OPEN: CalculatorApp is running" in result and "directly" not in result
+    assert mouse["moves"][-1] == (600, 1050) and mouse["clicks"] == 1, "the Start button"
+    assert mouse["typed"] == ["Calculator"] and mouse["keys"] == ["enter"]
+    [check] = client_.executor.lines
+    assert "Start-Process" not in check and "$program" in check, "only checked: the Start menu started it"
+
+
+def test_if_the_start_menu_doesnt_open_the_app_starts_directly(tmp_path, screen, mouse, monkeypatch):
+    monkeypatch.setattr(ai.platform, "WINDOWS", True)
+    screen["start_open"] = False
+    client_ = hands_on(tmp_path, lambda line: "OPEN: chrome is running")
+    result = asyncio.run(client_.dispatch_tool("open_app", {"name": "Google Chrome"}, ignore))
+    assert mouse["typed"] == [] and mouse["keys"] == [], "nothing typed when the Start menu hasn't the keyboard"
+    assert "Start-Process" in client_.executor.lines[0] and "started directly" in result
+    # An app the Start menu doesn't list is started directly, without the mouse.
+    mouse["moves"].clear()
+    asyncio.run(client_.dispatch_tool("open_app", {"name": "Upscayl"}, ignore))
+    assert mouse["moves"] == [] and "Upscayl.exe" in client_.executor.lines[-1]
+
+
+def test_hiding_is_a_gesture_that_is_kept(tmp_path):
+    client_ = client(tmp_path, FakeServer([]))
+    cues = []
+    assert asyncio.run(client_.dispatch_tool("hide", {"on": True}, cues.append)) == "hiding in the corner"
+    assert cues == [Hide(True)] and client_.db.get_snapshot("hidden")[0] == "1"
+    assert "hide" in ai.GESTURES and "close_app" in ai.ACTIONS
+    assert {"close_app", "hide"} <= set(tool_names(tool_specs(False)))
+
+
+def test_recall_searches_the_earlier_chats_too(tmp_path):
+    client_ = client(tmp_path, FakeServer([]))
+    client_.db.add_memory("fact", "The user studies in Sofia", 3)
+    client_.db.add_message(ChatLine(Role.USER, "My dog is called Sharo", 1_700_000_000_000), "old")
+    found = asyncio.run(client_.dispatch_tool("recall", {"query": "dog"}, ignore))
+    assert "From your chats:" in found and "the user said: My dog is called Sharo" in found and "2023" in found
+    assert "Sofia" not in found
+    assert "nothing about that" in asyncio.run(client_.dispatch_tool("recall", {"query": "quantum"}, ignore))
+
+
+def test_a_chat_left_behind_is_read_for_lasting_facts(tmp_path):
+    server = FakeServer([
+        ("/api/tags", {"models": [{"name": "qwen3.5:9b", "details": {"parameter_size": "9.7B"}}]}),
+        ("/api/chat", {"message": {"role": "assistant", "content": "", "tool_calls": [
+            {"function": {"name": "remember", "arguments": {"content": "The user's dog is called Sharo."}}},
+            {"function": {"name": "remember", "arguments": {"content": "The user studies in Sofia",
+                                                            "importance": 4}}}]}}),
+    ])
+    client_ = client(tmp_path, server)
+    client_.db.add_memory("fact", "The user studies in Sofia.", 3)
+    lines = [ChatLine(Role.USER, "My dog Sharo and I went for a walk"), ChatLine(Role.ASSISTANT, "Lovely!"),
+             ChatLine(Role.USER, "Open Word")]
+    assert asyncio.run(client_.remember_chat(lines)) == 1, "the one it knew already isn't kept twice"
+    assert "The user's dog is called Sharo." in [m.content for m in client_.db.top_memories(10)]
+    sent = server.seen[-1]
+    assert "Sofia" in sent["messages"][1]["content"] and "User: My dog Sharo" in sent["messages"][1]["content"]
+    assert [t["function"]["name"] for t in sent["tools"]] == ["remember"]
+    assert asyncio.run(client_.remember_chat([ChatLine(Role.ASSISTANT, "Hello!")])) == 0, "nothing the user said"
+
+
+def test_the_memory_reads_a_left_chat_once_then_only_whats_new(tmp_path):
+    from tomo.brain import ChatMemory
+
+    store, read, answers = Store(tmp_path / "chroma"), [], [None, 1, 1]
+
+    class Reader:
+        async def remember_chat(self, lines):
+            read.append([line.text for line in lines])
+            return answers.pop(0)  # None: the model couldn't
+
+    store.add_message(ChatLine(Role.USER, "I have a dog", 1), "a")
+    store.add_message(ChatLine(Role.ASSISTANT, "Nice!", 2), "a")
+    memory = ChatMemory(store, Reader(), "b")
+    for _ in range(3):
+        asyncio.run(memory.read("a"))
+    assert read == [["I have a dog", "Nice!"]] * 2, "tried again after a failure, then never again"
+    store.add_message(ChatLine(Role.USER, "and a cat", 3), "a")
+    asyncio.run(memory.read("a"))
+    assert read[-1] == ["and a cat"], "then only what's new"
+    asyncio.run(memory.read("never-used"))
+    assert len(read) == 3

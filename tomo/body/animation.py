@@ -129,6 +129,7 @@ class Animator:
     emotion: str | None = None
     emotion_age: float = 0.0
     speaking: bool = False
+    holding: bool = False  # her arms up, reaching for the cursor or hanging from it
     blink_in: float = 0.0
     blink_t: float | None = None
 
@@ -270,6 +271,12 @@ def target_pose(animator: Animator, loco: Locomotion, facing: float, yaw: Quat, 
                 (Bone.HEAD, rz(8.0)),
             ])
 
+    # Both arms up for the cursor, the hands meeting above her head: she
+    # reaches for it, then hangs from it as it flies.
+    if animator.holding:
+        blend_in(1.0, [(Bone.LEFT_UPPER_ARM, rz(70.0)), (Bone.RIGHT_UPPER_ARM, rz(-70.0)),
+                       (Bone.LEFT_LOWER_ARM, rz(35.0)), (Bone.RIGHT_LOWER_ARM, rz(-35.0))])
+
     # The physics' limbs. Knees give on landing, while the body sinks to
     # match; then arms, legs and head swing in the screen plane — in model
     # axes, a turn about the axis pointing out of the screen.
@@ -284,9 +291,10 @@ def target_pose(animator: Animator, loco: Locomotion, facing: float, yaw: Quat, 
     turn(Bone.LEFT_LOWER_LEG, rx(95.0 * knees))
     turn(Bone.RIGHT_LOWER_LEG, rx(95.0 * knees))
     out_of_screen = qrot(qconj(yaw), (0.0, 0.0, 1.0))
-    for bone, spring in ((Bone.LEFT_UPPER_ARM, limbs.arms[0]), (Bone.RIGHT_UPPER_ARM, limbs.arms[1]),
-                         (Bone.LEFT_UPPER_LEG, limbs.legs[0]), (Bone.RIGHT_UPPER_LEG, limbs.legs[1]),
-                         (Bone.HEAD, limbs.head)):
+    swinging = ((Bone.LEFT_UPPER_LEG, limbs.legs[0]), (Bone.RIGHT_UPPER_LEG, limbs.legs[1]), (Bone.HEAD, limbs.head))
+    if not animator.holding:  # holding the cursor, her hands stay on it
+        swinging += ((Bone.LEFT_UPPER_ARM, limbs.arms[0]), (Bone.RIGHT_UPPER_ARM, limbs.arms[1]))
+    for bone, spring in swinging:
         turn(bone, qaxis(out_of_screen, spring.x))
     return pose
 

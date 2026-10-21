@@ -15,6 +15,12 @@ indicator all live in the window. Commands Tomo runs are never shown here —
 only the conversation. The liquid is a cluster of merging circles easing from
 the character into a rounded panel.
 
+Beside her name, the chats: a new one (the brain empties the window — what
+Tomo knows about the user carries over), and the earlier ones, the latest
+first, to read again or carry on. On the right, by the voice and quit
+buttons: hiding her in the corner (which closes the chat too) or bringing
+her out.
+
 Pictures can go with a message: the 📎 button (the desktop's file dialog),
 dropping image files on the chat or on her (which opens the chat), or
 pasting (Ctrl+V: a screenshot, or image files copied in the file manager).
@@ -50,10 +56,12 @@ from typing import Callable, NamedTuple
 from imgui_bundle import imgui
 
 from .. import attachments, events, platform
-from ..events import CharacterChoice, ChatLine, ImportCharacter, Role, SetVoice, Shutdown, StartVoiceInput, UserMessage
+from ..events import (CharacterChoice, ChatInfo, ChatLine, ImportCharacter, NewChat, OpenChat, Role, SetHidden, SetVoice,
+                      Shutdown, StartVoiceInput, UserMessage)
 from .movement import Locomotion, body_size
-from .ui import (ICON_CHECK, ICON_CLOSE, ICON_COPY, ICON_IMAGE, ICON_MIC, ICON_MUTED, ICON_PAPERCLIP, ICON_POWER,
-                 ICON_SEND, ICON_USER, ICON_VOLUME, flags, rgba, vec4)
+from .ui import (ICON_CHECK, ICON_CLOSE, ICON_COPY, ICON_HIDE, ICON_HISTORY, ICON_IMAGE, ICON_MIC, ICON_MUTED,
+                 ICON_NEW_CHAT, ICON_PAPERCLIP, ICON_POWER, ICON_SEND, ICON_SHOW, ICON_USER, ICON_VOLUME, flags, rgba,
+                 vec4)
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +80,9 @@ LINE_END_W = 4.0  # px of highlight past a row's end where the selection runs on
 COPY_BOX = 16.0  # px: the copy button by a message's name
 COPIED_SECS = 1.5  # the "copied" tick or note
 SCROLL_SPEED = 10.0  # selecting past the transcript's edge: px a second per px beyond it
+CHATS_W = PANEL_W - 44.0  # px: the list of earlier chats…
+CHATS_SHOWN = 10  # …and how many rows of it show at once
+MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
 
 
 class Phase(Enum):
@@ -346,6 +357,9 @@ class ChatState:
     phase: Phase = Phase.CLOSED
     liquid_t: float = 0.0  # 0 fully retracted … 1 the panel formed
     transcript: list[ChatLine] = field(default_factory=list)
+    chats: list[ChatInfo] = field(default_factory=list)  # the history, the latest first
+    current_chat: str = ""  # the one showing
+    hidden: bool = False  # she's set to hide in the corner
     input: str = ""
     thinking: bool = False
     listening: bool = False  # "Hey Tomo" was heard; the spoken request is being taken
@@ -437,6 +451,13 @@ class ChatState:
                 del self.transcript[:extra]
                 self.selection.lines_dropped(extra)
             self.scroll_to_end = True
+        elif isinstance(event, events.Transcript):  # another chat (a new one: empty)
+            self.transcript = list(event.lines[-TRANSCRIPT_LIMIT:])
+            self.selection.clear()
+            self.copied_line = None
+            self.scroll_to_end = True
+        elif isinstance(event, events.ChatList):
+            self.chats, self.current_chat = list(event.chats), event.current
         elif isinstance(event, events.Thinking):
             self.thinking = event.on
             self.scroll_to_end = True
@@ -531,19 +552,37 @@ class ChatState:
         imgui.begin("tomo-chat", None, flags(w.no_decoration, w.no_move, w.no_saved_settings, w.no_scroll_with_mouse))
         close = quit_ = False
 
-        # The header: her name, then (from the right) close, quit, voice, character.
+        # The header: her name and the chats (a new one, the earlier ones);
+        # then (from the right) close, quit, voice, hiding, character.
         imgui.push_font(ui.bold, 18.0)
         imgui.text_colored(vec4(*ACCENT), "Tomo")
         imgui.pop_font()
-        buttons = 4
         size = imgui.get_frame_height()
         spacing = imgui.get_style().item_spacing.x
+        imgui.same_line()
+        if icon_button(ICON_NEW_CHAT, "New chat", size):
+            self.new_chat(send)
+        imgui.same_line()
+        if icon_button(ICON_HISTORY, "Earlier chats", size):
+            imgui.open_popup("chats")
+        # Under the header, inside the panel.
+        imgui.set_next_window_pos(imgui.ImVec2(x0 + 8.0, imgui.get_item_rect_max().y + 6.0), imgui.Cond_.appearing.value)
+        if imgui.begin_popup("chats"):
+            self.chat_menu(send)
+            imgui.end_popup()
+        buttons = 5
         imgui.same_line(imgui.get_window_width() - 14.0 - buttons * size - (buttons - 1) * spacing)
         if icon_button(ICON_USER, "Change character", size):
             imgui.open_popup("characters")
         if imgui.begin_popup("characters"):
             self.character_menu(showing, send)
             imgui.end_popup()
+        imgui.same_line()
+        if icon_button(ICON_SHOW if self.hidden else ICON_HIDE,
+                       "Come out of the corner" if self.hidden else "Hide in the corner", size, key="hide"):
+            send(SetHidden(not self.hidden))
+            if not self.hidden:
+                close = True  # out of the way: the chat too
         imgui.same_line()
         voice_icon = ICON_VOLUME if self.voice_replies else ICON_MUTED
         if icon_button(voice_icon, "Speak replies aloud: " + ("on" if self.voice_replies else "off"), size,
@@ -553,7 +592,7 @@ class ChatState:
         imgui.same_line()
         quit_ = icon_button(ICON_POWER, "Quit Tomo", size)
         imgui.same_line()
-        close = icon_button(ICON_CLOSE, "Close chat", size)
+        close = icon_button(ICON_CLOSE, "Close chat", size) or close
         imgui.separator()
 
         # The transcript, above the pictures waiting to go and the input row.
@@ -570,6 +609,8 @@ class ChatState:
         self.placed, self.hovered = [], None
         for index, line in enumerate(self.transcript):
             self.bubble(index, line, ui.thumbnails, font)
+        if not self.transcript and not self.thinking:
+            new_chat_note()
         if self.listening:
             imgui.text_colored(vec4(*ACCENT), "Listening…")
         if self.thinking:
@@ -656,6 +697,43 @@ class ChatState:
         clicked, _ = imgui.selectable("Import a .vrm…", False)
         if clicked:
             pick_character_file(send)
+
+    # ---- the chats -----------------------------------------------------------------------------
+
+    def new_chat(self, send: Callable) -> None:
+        """Start a new chat (the brain empties the window). During a reply,
+        once it's in."""
+        send(NewChat())
+        if self.thinking:
+            self.notice, self.notice_until = "A new chat starts once Tomo has answered", time.monotonic() + NOTICE_SECS
+        self.focus_input = True
+
+    def chat_menu(self, send: Callable) -> None:
+        """The chats there are: a new one, then each one before, the latest
+        first, with when it was last used (the one showing ticked)."""
+        clicked, _ = imgui.selectable(f"{ICON_NEW_CHAT}  New chat", False)
+        if clicked:
+            self.new_chat(send)
+        imgui.separator()
+        if not self.chats:
+            imgui.text_colored(vec4(150, 150, 150), "No chats yet")
+            return
+        row = imgui.get_text_line_height() + imgui.get_style().item_spacing.y
+        imgui.begin_child("chat-list", imgui.ImVec2(CHATS_W, row * min(len(self.chats), CHATS_SHOWN)))
+        now = time.time()
+        for info in self.chats:
+            when = when_said(info.updated_at, now)
+            when_w = imgui.calc_text_size(when).x
+            width = imgui.get_content_region_avail().x
+            title = fit(info.title or "(pictures)", width - when_w - 16.0)
+            clicked, _ = imgui.selectable(f"{title}##{info.id}", info.id == self.current_chat)
+            if clicked:
+                if info.id != self.current_chat:
+                    send(OpenChat(info.id))
+                imgui.close_current_popup()  # inside the list, a pick doesn't close it by itself
+            lo = imgui.get_item_rect_min()
+            imgui.get_window_draw_list().add_text(imgui.ImVec2(lo.x + width - when_w, lo.y), rgba(150, 150, 150), when)
+        imgui.end_child()
 
     # ---- the conversation ----------------------------------------------------------------------
 
@@ -888,6 +966,38 @@ def centre_glyph(box, glyph) -> tuple[float, float]:
 
 
 BUBBLES = {Role.USER: ((70, 130, 180), "You"), Role.ASSISTANT: ((38, 66, 74), "Tomo"), Role.SYSTEM: ((60, 60, 60), "•")}
+
+
+def new_chat_note() -> None:
+    """What an empty chat says, in its middle: that it's new, and that
+    what Tomo knows about the user carries over."""
+    avail = imgui.get_content_region_avail()
+    imgui.dummy(imgui.ImVec2(0.0, max(0.0, avail.y * 0.4 - 20.0)))
+    for text in ("A new chat.", "What Tomo knows about you carries over."):
+        imgui.set_cursor_pos_x(imgui.get_cursor_pos_x() + max(0.0, (avail.x - imgui.calc_text_size(text).x) * 0.5))
+        imgui.text_colored(vec4(130, 130, 130), text)
+
+
+def when_said(at_ms: int, now: float | None = None) -> str:
+    """When a chat was last used, briefly: "14:05" today, "Yesterday",
+    "12 Oct" this year, "12 Oct 2025" before."""
+    now = time.time() if now is None else now
+    t, today, yesterday = time.localtime(at_ms / 1000), time.localtime(now), time.localtime(now - 86400)
+    if (t.tm_year, t.tm_yday) == (today.tm_year, today.tm_yday):
+        return f"{t.tm_hour:02d}:{t.tm_min:02d}"
+    if (t.tm_year, t.tm_yday) == (yesterday.tm_year, yesterday.tm_yday):
+        return "Yesterday"
+    return f"{t.tm_mday} {MONTHS[t.tm_mon - 1]}" + ("" if t.tm_year == today.tm_year else f" {t.tm_year}")
+
+
+def fit(text: str, width: float, measure: Callable[[str], float] | None = None) -> str:
+    """``text`` cut short with "…" to fit ``width`` px."""
+    measure = measure or (lambda s: imgui.calc_text_size(s).x)
+    if measure(text) <= width:
+        return text
+    while text and measure(text + "…") > width:
+        text = text[:-1]
+    return text.rstrip() + "…"
 
 
 def pictures(line: ChatLine, thumbnails, place: Callable[[float], None], widest: float) -> None:

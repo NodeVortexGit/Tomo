@@ -1,15 +1,21 @@
 """The brain's thinking: a local model (Ollama or LM Studio) and its tools.
 
 Each turn the model gets the persona (with what the computer is: sysinfo.py),
-what Tomo remembers and the recent conversation — with any images the user
-sent and the notes on them (attachments.py) — and answers, often by calling
-tools first: run a command, open an app, set the volume, move, remember
-something, look at the screen, pick the character's voice. The loop runs
-those, feeds the results back, and repeats until the model answers in words.
+what Tomo remembers about the user (the same in every chat) and the current
+chat's recent lines — with any images the user sent and the notes on them
+(attachments.py) — and answers, often by calling tools first: run a command,
+open or close an app, set the volume, move, remember something, look at the
+screen, pick the character's voice. The loop runs those, feeds the results
+back, and repeats until the model answers in words.
+
+Apps open and close with the mouse, where the user can watch (hands.py,
+desktop.py): she carries the cursor to the Start button and types the app's
+name, or to a window's close button — and the result is checked either way.
 
 The model also chooses each character's voice, once, the first time the
 character appears: it's shown the character's picture and calls set_voice
-(:meth:`AiClient.ensure_voice`).
+(:meth:`AiClient.ensure_voice`); and when the user leaves a chat, it reads
+it once more for lasting facts about the user (:meth:`AiClient.remember_chat`).
 
 Guards learned the hard way:
   * a reply that only *promises* to act ("I'll open them!") gets one reminder
@@ -37,13 +43,14 @@ from typing import Any, Callable
 
 import httpx
 
-from . import attachments as attached, characters, platform, screen, sysinfo, volume
-from .apps import SystemCatalog, checked_launch
+from . import attachments as attached, characters, desktop, platform, screen, sysinfo, volume
+from .apps import DesktopApp, SystemCatalog, checked_launch, confirm_open, running_program
 from .commands import Executor
 from .config import DEFAULT_VOICE_BG, DEFAULT_VOICE_FEMALE, DEFAULT_VOICE_MALE, Config, LlmProvider
 from .db import Store
-from .events import (Animate, Attachment, BrainToUi, Characters, Chat, ChatLine, ClickAt, ControlMode, Emote,
-                     LoadCharacter, Role, Thinking, TypeText, WalkTo)
+from .events import (Animate, Attachment, BrainToUi, Characters, Chat, ChatLine, Emote, Hide, LoadCharacter, Role,
+                     Thinking, WalkTo)
+from .hands import BodyState, Hands, Stopped, screenshot_to_screen
 from .language import Language
 
 log = logging.getLogger(__name__)
@@ -53,9 +60,25 @@ MAX_TOOL_ROUNDS = 6
 # No more tool rounds after this long: the user is waiting.
 TURN_BUDGET = 60.0
 # Tools that act on the computer, whose results say whether that worked.
-ACTIONS = ("execute_command", "open_app", "set_volume", "toggle_system")
+ACTIONS = ("execute_command", "open_app", "close_app", "set_volume", "toggle_system")
 # Tools that only move the body: done at once, nothing to report back.
-GESTURES = ("express", "animate", "walk_to")
+GESTURES = ("express", "animate", "walk_to", "hide")
+# Opening an app with the mouse goes through the Start menu, which knows
+# these (apps.SOURCES); the others are started directly.
+START_MENU_SOURCES = ("start menu", "apps folder")
+START_OPENS_SECS = 2.0  # for the Start menu to open after the click…
+START_SEARCH_SECS = 1.2  # …and to find the app once its name is typed
+CLOSE_WAIT_SECS = 3.0  # for a window to close after its close button
+MAX_CLOSED_WINDOWS = 4  # an app's windows closed one by one; any more are asked all at once
+MEMORY_PASS = ("You keep the long-term memory of {name}, an assistant who lives on the user's computer. Read the "
+               "conversation below. Call remember once for each lasting fact about the user in it that isn't "
+               "among what's remembered already: who they are, their name, people and pets in their life, their "
+               "work, studies and projects, what they like and dislike, their plans and habits, how they want "
+               "things done. Not passing requests (open an app, the time, the volume) or what was true only for "
+               "the moment. Each fact one short sentence about the user, in the conversation's language. If "
+               "there's nothing new, answer: nothing.")
+MEMORY_PASS_LINES = 80  # the most of a chat the memory reads at once
+MEMORY_PASS_CHARS = 8000
 CHECK_RESULTS = ("(Check your answer against the tool results: none of the actions worked. "
                  "Say plainly what did not happen, and why.)")
 ACT_NOW = ("(You haven't done it yet: nothing happens after your answer. Call the tools now, "
@@ -66,9 +89,7 @@ VOICE_CHOICE = ("You choose the voice of a 3D character who lives on the user's 
                 "character's picture and details, then call set_voice once: male or female.")
 # The character's picture, as the model sees it when choosing its voice (px).
 VOICE_PICTURE_EDGE = 384
-# How much transcript to show in the chat after a restart…
-TRANSCRIPT_CONTEXT = 20
-# …and how much the model reads each turn (fewer tokens).
+# How much of the chat the model reads each turn (fewer tokens).
 MODEL_CONTEXT = 12
 OLLAMA_URL = "http://127.0.0.1:11434"
 LM_STUDIO_URL = "http://127.0.0.1:1234/v1"
@@ -134,12 +155,14 @@ Ui = Callable[[BrainToUi], None]
 
 class AiClient:
     def __init__(self, cfg: Config, db: Store, executor: Executor, catalog: "SharedCatalog",
-                 control_allowed: threading.Event, http: httpx.AsyncClient | None = None) -> None:
+                 control_allowed: threading.Event, http: httpx.AsyncClient | None = None,
+                 body: BodyState | None = None) -> None:
         self.cfg = cfg
         self.db = db
         self.executor = executor
         self.catalog = catalog
         self.control_allowed = control_allowed
+        self.body = body  # where her hands are, for the mouse (none: no body, as in `tomo ask`)
         self.http = http or httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
         # Screen pixels per pixel of the last screenshot the model saw.
         self.screen_scale = 1.0
@@ -154,9 +177,15 @@ class AiClient:
 
     # ---- a turn ---------------------------------------------------------------------
 
-    async def respond(self, user_text: str, ui: Ui, images: tuple[Attachment, ...] = ()) -> str:
+    def hands(self, ui: Ui) -> Hands:
+        """Her use of the mouse and keyboard, for this turn."""
+        return Hands(ui, self.body, self.control_allowed, self.cfg.use_mouse)
+
+    async def respond(self, user_text: str, ui: Ui, images: tuple[Attachment, ...] = (), chat: str | None = None
+                      ) -> str:
         """Reply to ``user_text`` (and the ``images`` sent with it), driving
-        the body through ``ui`` on the way."""
+        the body through ``ui`` on the way. The conversation so far is the
+        ``chat``'s (None: the latest lines, whichever chat)."""
         try:
             server = await self.server()
         except LookupError as problem:
@@ -167,7 +196,7 @@ class AiClient:
             ui(Chat(ChatLine(Role.SYSTEM, f"{self.cfg.persona_name} is thinking with {server.model}, a model too "
                                           "small to use tools, so running commands, opening apps and clicking "
                                           f"won't work. A bigger model fixes that: ollama pull {SUGGESTED_MODEL}")))
-        history = self.db.recent_messages(MODEL_CONTEXT)
+        history = self.db.recent_messages(MODEL_CONTEXT, chat)
         # Pictures alone: answer in the language the user last wrote in.
         spoken = user_text or next((line.text for line in reversed(history) if line.role == Role.USER), "")
         messages = [Msg("system", self.system_prompt(Language.of(spoken)))] + await asyncio.to_thread(
@@ -203,6 +232,39 @@ class AiClient:
                 log.warning("couldn't load %s: %s", server.model, response.status_code)
         except httpx.HTTPError as e:
             log.warning("couldn't load %s: %s", server.model, e)
+
+    # ---- the memory ---------------------------------------------------------------------
+
+    async def remember_chat(self, lines: list[ChatLine]) -> int | None:
+        """Read a chat for lasting facts about the user and keep the ones the
+        memory doesn't have yet — so they hold in every chat, new ones too,
+        even those the model didn't think to remember as it talked. Returns
+        how many were new; None if the model couldn't read it (try later)."""
+        name = self.cfg.persona_name
+        said = [f"{'User' if line.role == Role.USER else name}: {line.text}" for line in lines
+                if line.text and line.role in (Role.USER, Role.ASSISTANT)][-MEMORY_PASS_LINES:]
+        if not any(line.role == Role.USER and line.text for line in lines):
+            return 0
+        conversation = "\n".join(said)[-MEMORY_PASS_CHARS:]
+        known = "".join(f"- {m.content}\n" for m in self.db.top_memories(40)) or "(nothing yet)\n"
+        try:
+            server = await self.server()
+            tools = [t for t in self.tools() if t["function"]["name"] == "remember"]
+            messages = [Msg("system", MEMORY_PASS.format(name=name)),
+                        Msg("user", f"Remembered already:\n{known}\nThe conversation:\n{conversation}")]
+            _, calls = await self.chat(server, messages, tools, ["remember"])
+        except Exception as e:  # noqa: BLE001 - next time, then
+            log.info("couldn't read the chat for the memory: %s", e)
+            return None
+        added = 0
+        for call in calls:
+            content = " ".join(str(call.arguments.get("content") or "").split())
+            if call.name == "remember" and content and not self.db.knows(content):
+                self.db.add_memory(str(call.arguments.get("kind") or "fact"), content,
+                                   _int(call.arguments.get("importance"), 2))
+                added += 1
+        log.info("the memory kept %d new fact(s) from a chat", added)
+        return added
 
     # ---- the server ----------------------------------------------------------------
 
@@ -310,21 +372,25 @@ class AiClient:
             "with Start-Process or another command (execute_command is for files, folders and web pages).\n"
             f"   c. Read the result. {not_opened} means it did not open: tell the user so and why, never that it "
             "opened, and don't try to start it another way.\n"
-            f"3. Use the other dedicated tools where they fit: set_volume for the volume, {switches}find_on_screen "
-            "then click_at for a visible click. Everything else goes through execute_command, finding things out "
-            "too (the time, free disk space, what's running): look around the system when you need to.\n"
-            "4. Before you answer, be certain each command did its job: check its result, and if that doesn't "
+            "3. To close an app, use close_app: it closes the app's windows with their close button, as a person "
+            "would, so the app can ask to save first. Stop-Process only if the user asks you to force it.\n"
+            f"4. Use the other dedicated tools where they fit: set_volume for the volume, {switches}find_on_screen "
+            "then click_at for a visible click, hide when the user wants you out of the way. Everything else goes "
+            "through execute_command, finding things out too (the time, free disk space, what's running): look "
+            "around the system when you need to.\n"
+            "5. Before you answer, be certain each command did its job: check its result, and if that doesn't "
             "show it, check the system. \"Open Chrome\" means the Chrome browser is open; \"open settings\" "
             "means Settings is open; \"set the volume to 30\" means it is at exactly 30. Never say something is "
             "done before a tool result shows it, and never invent output.\n"
-            "5. If a command fails, read the error and fix it; after two more tries, say what went wrong.\n"
+            "6. If a command fails, read the error and fix it; after two more tries, say what went wrong.\n"
             "HOW YOU TALK:\n"
             "- Your replies are read aloud: one or two plain sentences, no markdown, lists or emoji.\n"
             "- You speak English and Bulgarian (in Cyrillic): answer in the language of the user's latest "
             "message.\n"
             "MEMORY, SCREEN AND IMAGES:\n"
-            "- Keep lasting facts about the user with remember or set_preference; recall when unsure. "
-            "look_at_screen only when seeing it clearly helps; walk_to, express and animate only now and then.\n"
+            "- Keep lasting facts about the user with remember or set_preference; they hold in every chat. recall "
+            "when unsure: it searches your earlier chats too. look_at_screen only when seeing it clearly helps; "
+            "walk_to, express and animate only now and then.\n"
             "- The user can send you images. Each comes with notes from the system: where the file is, its "
             "size and dates, and its EXIF (when and where it was taken). Use them when they help, e.g. the "
             "file's path in a command.\n"
@@ -533,8 +599,14 @@ class AiClient:
             self.db.set_pref(key, str(args.get("value") or ""))
             return f"saved preference {key}"
         if name == "recall":
-            hits = self.db.search_memories(str(args.get("query") or ""), 8)
-            return "\n".join(f"- {m.content}" for m in hits) if hits else "no matching memories"
+            query = str(args.get("query") or "")
+            found = [f"- {m.content}" for m in self.db.search_memories(query, 8)]
+            said = self.db.search_messages(query, 6)
+            if said:
+                found.append("From your chats:")
+                found += [f"- {day(line.at_ms)}, {'the user' if line.role == Role.USER else 'you'} said: "
+                          f"{' '.join(line.text.split())[:240]}" for line, _ in said]
+            return "\n".join(found) if found else "nothing about that in your memory or your chats"
         if name == "walk_to":
             position = max(0.0, min(1.0, _float(args.get("position"), 0.5)))
             ui(WalkTo(position))
@@ -587,7 +659,15 @@ class AiClient:
                 return (f"no installed app is called '{wanted}'; the nearest names: {nearest}. If one of them is the "
                         "app meant, open it now; if the name was in another language, try the app's English name; "
                         "if nothing fits, tell the user it isn't installed.")
-            return (await self.executor.run(launch_line(hits[0].exec, hits[0].program))).summary()
+            return await self.open_app(hits[0], ui)
+        if name == "close_app":
+            wanted = str(args.get("name") or "").strip()
+            return await self.close_app(wanted, ui) if wanted else "which app? give its name"
+        if name == "hide":
+            on = bool(args.get("on", True))
+            ui(Hide(on))
+            self.db.set_snapshot("hidden", "1" if on else "0", "")
+            return "hiding in the corner" if on else "out of the corner"
         if name == "click_at":
             if not self.control_allowed.is_set():
                 return "mouse/keyboard control is switched off by the user"
@@ -595,17 +675,24 @@ class AiClient:
             if x < 0 or y < 0:
                 return "need valid x,y coordinates"
             # From the screenshot's pixels to the screen's.
-            x, y = x * self.screen_scale, y * self.screen_scale
-            ui(ControlMode(True))
-            ui(ClickAt(x, y, bool(args.get("double"))))
-            return f"walking over to click at ({x:.0f}, {y:.0f})"
+            x, y = screenshot_to_screen(x * self.screen_scale, y * self.screen_scale)
+            try:
+                await self.hands(ui).click_at(x, y, bool(args.get("double")))
+            except Stopped:
+                return STOPPED
+            return f"clicked at ({x:.0f}, {y:.0f})"
         if name == "type_text":
             if not self.control_allowed.is_set():
                 return "mouse/keyboard control is switched off by the user"
             text = str(args.get("text") or "")
             if not text:
                 return "nothing to type"
-            ui(TypeText(text))
+            hands = self.hands(ui)
+            try:
+                async with hands.task():
+                    await hands.type(text)
+            except Stopped:
+                return STOPPED
             return f"typed {len(text)} characters"
         if name == "toggle_system":
             key, on = str(args.get("key") or ""), bool(args.get("on", True))
@@ -625,6 +712,122 @@ class AiClient:
         if name in ("look_at_screen", "find_on_screen"):
             return "looking at the screen is switched off by the user"
         return f"unknown tool: {name}"
+
+    # ---- opening and closing apps -----------------------------------------------------------
+
+    async def open_app(self, app: DesktopApp, ui: Ui) -> str:
+        """Open an app — with the mouse, through the Start menu, where she may
+        use it and the Start menu knows the app; otherwise (or if that didn't
+        work) straight away. Either way, the result says if it's running."""
+        hands = self.hands(ui)
+        if self.cfg.use_mouse and platform.WINDOWS and app.source in START_MENU_SOURCES and hands.able():
+            start = await asyncio.to_thread(desktop.start_button)
+            if start is not None:
+                result = await self.open_through_start(app, hands, start)
+                if result is not None:
+                    return result
+                started = (await self.executor.run(launch_line(app.exec, app.program))).summary()
+                return f"{started}\n(The Start menu didn't open it, so it was started directly.)"
+        return (await self.executor.run(launch_line(app.exec, app.program))).summary()
+
+    async def open_through_start(self, app: DesktopApp, hands: Hands, start: tuple[int, int]) -> str | None:
+        """Carry the cursor to the Start button (at ``start``) and click it,
+        type the app's name, press Enter, then make sure it's running. None:
+        it didn't open this way. Nothing is typed unless the Start menu has
+        the keyboard."""
+        point = start
+        began = time.monotonic()
+        try:
+            async with hands.task():
+                await hands.carry_to(*point)
+                await hands.click()
+                if not await until(desktop.start_menu_open, START_OPENS_SECS):
+                    return None
+                await hands.let_go()
+                await hands.type(app.name)
+                await asyncio.sleep(START_SEARCH_SECS)
+                if not desktop.start_menu_open():
+                    return None
+                await hands.key("enter")
+        except Stopped:
+            return STOPPED
+        result = (await self.executor.run(confirm_open(app.exec, app.program, time.monotonic() - began + 1))).summary()
+        if "NOT CONFIRMED" in result:
+            if desktop.start_menu_open() and hands.able():
+                await hands.key("escape")
+            return None
+        return result
+
+    async def close_app(self, wanted: str, ui: Ui) -> str:
+        """Close an app's windows as a person would: carry the cursor to each
+        one's close button and click it — or, where a window doesn't say
+        where that is, ask it to close the way the button would. A window
+        that stays open is left be (it's likely asking about unsaved work)."""
+        hits = self.catalog.get().find_app(wanted)
+        app = hits[0] if hits else None
+        name = app.name if app is not None else wanted
+        windows = await asyncio.to_thread(desktop.app_windows, running_program(app) if app else "", name)
+        if not windows and app is not None:
+            windows = await asyncio.to_thread(desktop.app_windows, "", wanted)
+        if not windows:
+            return f"NOT OPEN: no window of {name} is open, so there's nothing to close"
+        hands = self.hands(ui)
+        left = []
+        for window in windows[:MAX_CLOSED_WINDOWS]:
+            try:
+                problem = await self.close_window(window, hands)
+            except Stopped:
+                return STOPPED
+            if problem:
+                left.append(f"“{window.title}” {problem}")
+        for window in windows[MAX_CLOSED_WINDOWS:]:
+            desktop.ask_to_close(window)
+        if left:
+            return (f"NOT CLOSED: {'; '.join(left)}. Tell the user; don't force it closed unless they ask.")
+        return f"CLOSED: {name} ({len(windows)} window{'s' if len(windows) > 1 else ''})"
+
+    async def close_window(self, window: desktop.AppWindow, hands: Hands) -> str | None:
+        """Close one window; what's in the way if it stays open (None: closed)."""
+        await asyncio.to_thread(desktop.bring_forward, window)
+        await asyncio.sleep(0.25)
+        button = await asyncio.to_thread(desktop.close_button, window)
+        if self.cfg.use_mouse and hands.able() and platform.WINDOWS:
+            async with hands.task():
+                await hands.carry_to(*(button or desktop.corner(window)))
+                # A real click only where the window itself says its close
+                # button is, and nothing covers it there.
+                if button is not None and desktop.shows_at(window, *button):
+                    await hands.click()
+                    log.info("closing “%s” with its close button", window.title)
+                else:
+                    desktop.ask_to_close(window)
+                    log.info("closing “%s”: asked (its close button %s)", window.title,
+                             "is covered" if button else "isn't said")
+        else:
+            desktop.ask_to_close(window)
+        if await until(lambda: not desktop.is_open(window), CLOSE_WAIT_SECS):
+            return None
+        dialog = desktop.dialog_of(window)
+        return f"is asking “{dialog}”" if dialog else "is still open (it may be asking whether to save)"
+
+
+STOPPED = "STOPPED: the user took the mouse back with the panic key; nothing more was done"
+
+
+async def until(condition: Callable[[], bool], seconds: float) -> bool:
+    """Wait up to ``seconds`` for ``condition``; whether it came true."""
+    deadline = time.monotonic() + seconds
+    while True:
+        if condition():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.05)
+
+
+def day(at_ms: int) -> str:
+    """A date the way it's said: "12 Oct 2026"."""
+    return time.strftime("%d %b %Y", time.localtime(at_ms / 1000)).lstrip("0")
 
 
 class SharedCatalog:
@@ -678,7 +881,8 @@ def only_promises(text: str) -> bool:
 def action_failed(result: str) -> bool:
     """Whether an action's result says it didn't work (or that it couldn't
     be confirmed: an app that was started but isn't running)."""
-    return (result.startswith(("REFUSED", "TIMEOUT", "no installed app", "no '", "this system has no"))
+    return (result.startswith(("REFUSED", "TIMEOUT", "no installed app", "no '", "this system has no", "NOT OPEN",
+                               "NOT CLOSED", "STOPPED"))
             or (result.startswith("exit=") and result != "exit=0" and not result.startswith("exit=0\n"))
             or "NOT CONFIRMED:" in result)
 
@@ -995,6 +1199,10 @@ def tool_specs(allow_screen: bool,
         function("open_app", "Open an installed app by its name here, e.g. 'Word'; the result says if it's running. "
                              "Several apps: call it once each, in one reply.",
                  {"name": string}, ["name"]),
+        function("close_app", "Close an open app's windows with their close button, e.g. 'Chrome'; the result says "
+                              "if they closed.", {"name": string}, ["name"]),
+        function("hide", "Hide in the corner of the screen, out of the way (on false: come back out).",
+                 {"on": boolean}, []),
         function("click_at", "Click a screen point from find_on_screen with the real mouse (if the user allowed control).",
                  {"x": number, "y": number, "double": boolean}, ["x", "y"]),
         function("type_text", "Type on the keyboard (if the user allowed control).", {"text": string}, ["text"]),

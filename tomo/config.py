@@ -75,6 +75,9 @@ class Config:
     allow_command_execution: bool = True
     extra_allowed_commands: list[str] = field(default_factory=list)
     allow_screen: bool = True
+    # Opening and closing apps (and clicking) with the mouse where the user
+    # can watch: she picks the cursor up and carries it. Off: out of sight.
+    use_mouse: bool = True
     wake_word: bool = True
     # How memories are embedded for search: "ngram" (built in, offline,
     # language-independent) or "minilm" (ChromaDB's stock English model).
@@ -141,6 +144,7 @@ class Config:
                 p.strip() for p in (env_str("TOMO_EXTRA_ALLOWED") or "").split(",") if p.strip()
             ],
             allow_screen=env_bool("TOMO_ALLOW_SCREEN", True),
+            use_mouse=env_bool("TOMO_USE_MOUSE", True),
             wake_word=env_bool("TOMO_WAKE_WORD", True),
             embeddings=(env_str("TOMO_EMBEDDINGS") or "ngram").lower(),
         )

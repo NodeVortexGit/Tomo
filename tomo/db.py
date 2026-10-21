@@ -1,15 +1,21 @@
 """Long-term memory, in ChromaDB.
 
 What lets the assistant remember preferences and facts across restarts, and
-pull them back out before answering. Five collections:
+pull them back out before answering. Six collections:
 
   preferences  key → value the user set or the AI inferred ("name" → "Alex")
   memories     free-form facts worth keeping, each with an importance, and an
                embedding so ``recall`` finds them by meaning as well as words
-  messages     the rolling chat transcript, in order, with the images sent
+  messages     every chat's lines, in order, each with its chat and the
+               images sent
+  chats        the chats: title (the first words), when started and last
+               used, how many lines, and how far the memory has read them
   characters   the VRM models on offer, which one is showing, and each
                one's voice (male or female, as the model chose it)
   snapshots    cached OS scans (the app catalogue), with a fingerprint
+
+Preferences and memories belong to no chat: what Tomo knows about the user
+holds in every chat, new ones too.
 
 Memories are embedded with a small built-in character-n-gram embedding:
 offline, instant, and it works for Bulgarian as well as English (word forms
@@ -34,14 +40,20 @@ import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .events import Attachment, ChatLine, Role, now_ms
+from .events import Attachment, ChatInfo, ChatLine, Role, now_ms
 
 log = logging.getLogger(__name__)
 
 NGRAM_DIMENSIONS = 384
-# Where ChromaDB's search stops counting a memory as related (cosine distance).
+# Where ChromaDB's search stops counting a memory as related (cosine distance)…
 RELATED = 0.85
+# …and where a new one is the same as one kept already.
+SAME_MEMORY = 0.2
 PLACEHOLDER = [1.0]
+# The old single transcript becomes chats: a new one after a pause this long.
+CHAT_GAP_MS = 3 * 3600 * 1000
+TITLE_CHARS = 60
+BATCH = 500  # records a ChromaDB call changes at once
 
 
 @dataclass
@@ -104,6 +116,7 @@ class Store:
 
         self.preferences = collection("preferences")
         self.messages = collection("messages")
+        self.chats = collection("chats")
         self.characters = collection("characters")
         self.snapshots = collection("snapshots")
         self.memories = collection("memories", embedding=embeddings)
@@ -180,10 +193,21 @@ class Store:
         ranked = sorted(found.values(), key=lambda m: (-m.importance, -m.created_at))
         return ranked[:limit]
 
-    # ---- the transcript ---------------------------------------------------------
+    def knows(self, content: str) -> bool:
+        """Whether a memory says (nearly) this already."""
+        with self._lock:
+            if self.memories.count() == 0:
+                return False
+            near = self.memories.query(query_embeddings=[self._embed(content)], n_results=1)
+        documents, distances = near["documents"][0], near["distances"][0]
+        return bool(documents) and (documents[0].strip().lower() == content.strip().lower()
+                                    or distances[0] <= SAME_MEMORY)
 
-    def add_message(self, line: ChatLine) -> None:
-        meta = {"seq": 0, "role": line.role.value, "at_ms": line.at_ms}
+    # ---- the chats ----------------------------------------------------------------
+
+    def add_message(self, line: ChatLine, chat: str = "") -> None:
+        """Keep a line, in ``chat`` (which this starts, if it's new)."""
+        meta = {"seq": 0, "role": line.role.value, "at_ms": line.at_ms, "chat": chat}
         if line.attachments:
             # Metadata holds only plain values: the images go in as JSON.
             meta["attachments"] = json.dumps([asdict(a) for a in line.attachments], ensure_ascii=False)
@@ -191,17 +215,111 @@ class Store:
             meta["seq"] = seq = self.messages.count()
             self.messages.add(ids=[f"msg-{seq:09d}"], documents=[line.text], embeddings=[PLACEHOLDER],
                               metadatas=[meta])
+            if chat:
+                got = self.chats.get(ids=[chat])
+                old = got["metadatas"][0] if got["ids"] else {"started_at": line.at_ms, "count": 0, "remembered": -1}
+                title = got["documents"][0] if got["ids"] else ""
+                if not title and line.role == Role.USER:
+                    title = chat_title(line)
+                self.chats.upsert(ids=[chat], documents=[title], embeddings=[PLACEHOLDER], metadatas=[
+                    {**old, "updated_at": line.at_ms, "count": int(old.get("count", 0)) + 1}])
 
-    def recent_messages(self, limit: int) -> list[ChatLine]:
-        """The ``limit`` most recent lines, oldest first."""
+    def recent_messages(self, limit: int, chat: str | None = None) -> list[ChatLine]:
+        """The ``limit`` most recent lines of ``chat`` (None: of all of
+        them), oldest first."""
+        if limit <= 0:
+            return []
+        if chat is not None:
+            return self.chat_lines(chat)[0][-limit:]
         with self._lock:
             total = self.messages.count()
-            if total == 0 or limit <= 0:
+            if total == 0:
                 return []
             got = self.messages.get(where={"seq": {"$gte": max(0, total - limit)}})
         rows = sorted(zip(got["metadatas"], got["documents"]), key=lambda r: r[0]["seq"])
-        return [ChatLine(Role(m["role"]), d or "", int(m["at_ms"]), _attachments(m.get("attachments")))
-                for m, d in rows]
+        return [_line(m, d) for m, d in rows]
+
+    def chat_lines(self, chat: str, after: int = -1) -> tuple[list[ChatLine], int]:
+        """A chat's lines, in order — those after line number ``after`` — and
+        the last one's number (-1: none)."""
+        with self._lock:
+            got = self.messages.get(where={"chat": chat})
+        rows = sorted(((m, d) for m, d in zip(got["metadatas"], got["documents"]) if int(m["seq"]) > after),
+                      key=lambda r: r[0]["seq"])
+        return [_line(m, d) for m, d in rows], (int(rows[-1][0]["seq"]) if rows else after)
+
+    def list_chats(self) -> list[ChatInfo]:
+        """Every chat, the most recently used first."""
+        with self._lock:
+            got = self.chats.get()
+        chats = [ChatInfo(i, d or "", int(m.get("started_at", 0)), int(m.get("updated_at", 0)), int(m.get("count", 0)))
+                 for i, d, m in zip(got["ids"], got["documents"], got["metadatas"])]
+        return sorted(chats, key=lambda c: (-c.updated_at, c.id))
+
+    def remembered(self, chat: str) -> int:
+        """How far the memory has read a chat: its last line number read (-1: none)."""
+        with self._lock:
+            got = self.chats.get(ids=[chat])
+        return int(got["metadatas"][0].get("remembered", -1)) if got["ids"] else -1
+
+    def set_remembered(self, chat: str, seq: int) -> None:
+        with self._lock:
+            got = self.chats.get(ids=[chat])
+            if got["ids"]:
+                self.chats.update(ids=[chat], metadatas=[{**got["metadatas"][0], "remembered": seq}])
+
+    def search_messages(self, query: str, limit: int) -> list[tuple[ChatLine, str]]:
+        """Lines from any chat that have the query's words in them (word forms
+        too: "кучето" finds "куче"), the most words first, then the newest;
+        each with its chat."""
+        stems = {w[:5] if len(w) > 5 else w for w in re.findall(r"\w+", query.lower()) if len(w) >= 3}
+        if not stems:
+            return []
+        with self._lock:
+            got = self.messages.get()
+        scored = []
+        for meta, text in zip(got["metadatas"], got["documents"]):
+            words = (text or "").lower()
+            score = sum(stem in words for stem in stems)
+            if score:
+                scored.append((score, int(meta["seq"]), _line(meta, text), str(meta.get("chat") or "")))
+        scored.sort(key=lambda s: (-s[0], -s[1]))
+        return [(line, chat) for _, _, line, chat in scored[:limit]]
+
+    def split_into_chats(self, gap_ms: int = CHAT_GAP_MS) -> int:
+        """Earlier versions kept one long transcript: give its lines chats —
+        a new chat after each pause longer than ``gap_ms``. Once; returns how
+        many chats it made."""
+        if self.get_snapshot("chats-split") is not None:
+            return 0
+        with self._lock:
+            got = self.messages.get()
+        rows = sorted(((i, m, d) for i, m, d in zip(got["ids"], got["metadatas"], got["documents"])
+                       if not m.get("chat")), key=lambda r: r[1]["seq"])
+        ids, metas, chats = [], [], {}  # chat → [title, metadata]
+        chat, last = "", None
+        for i, meta, text in rows:
+            at = int(meta.get("at_ms", 0))
+            if last is None or at - last > gap_ms:
+                chat = f"chat-{at}-{len(chats)}"
+                chats[chat] = ["", {"started_at": at, "updated_at": at, "count": 0, "remembered": -1}]
+            last = at
+            ids.append(i)
+            metas.append({**meta, "chat": chat})
+            line, info = _line(meta, text), chats[chat]
+            info[1]["updated_at"], info[1]["count"] = at, info[1]["count"] + 1
+            if not info[0] and line.role == Role.USER:
+                info[0] = chat_title(line)
+        with self._lock:
+            for start in range(0, len(ids), BATCH):
+                self.messages.update(ids=ids[start:start + BATCH], metadatas=metas[start:start + BATCH])
+            if chats:
+                self.chats.upsert(ids=list(chats), documents=[c[0] for c in chats.values()],
+                                  embeddings=[PLACEHOLDER] * len(chats), metadatas=[c[1] for c in chats.values()])
+        self.set_snapshot("chats-split", str(len(chats)), str(len(rows)))
+        if chats:
+            log.info("the transcript's %d lines are %d chats now", len(rows), len(chats))
+        return len(chats)
 
     # ---- characters -------------------------------------------------------------
 
@@ -317,6 +435,18 @@ def _role(text: str) -> Role:
         return Role(text.lower())
     except ValueError:
         return Role.SYSTEM
+
+
+def _line(meta: dict, text: str | None) -> ChatLine:
+    return ChatLine(Role(meta["role"]), text or "", int(meta["at_ms"]), _attachments(meta.get("attachments")))
+
+
+def chat_title(line: ChatLine) -> str:
+    """A chat's title: the first thing the user said, on one line."""
+    text = " ".join(line.text.split())
+    if not text:
+        return "A picture" if line.attachments else ""
+    return text if len(text) <= TITLE_CHARS else text[:TITLE_CHARS - 1].rstrip() + "…"
 
 
 def _attachments(stored) -> tuple[Attachment, ...]:

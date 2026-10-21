@@ -48,6 +48,17 @@ class CharacterChoice:
     path: Path
 
 
+@dataclass(frozen=True)
+class ChatInfo:
+    """One chat in the history."""
+
+    id: str
+    title: str  # its first words
+    started_at: int  # ms
+    updated_at: int  # ms
+    count: int  # lines
+
+
 # ---- body → brain ---------------------------------------------------------------
 
 
@@ -86,11 +97,31 @@ class SetVoice:
 
 
 @dataclass(frozen=True)
+class NewChat:
+    """Start a new chat (what Tomo knows about the user stays)."""
+
+
+@dataclass(frozen=True)
+class OpenChat:
+    """Go back to a chat from the history, to read it or carry on."""
+
+    id: str
+
+
+@dataclass(frozen=True)
+class SetHidden:
+    """Hide her in the corner of the screen, or bring her out."""
+
+    on: bool
+
+
+@dataclass(frozen=True)
 class Shutdown:
     pass
 
 
-UiToBrain = UserMessage | StartVoiceInput | ImportCharacter | PanicStop | SetControlAllowed | SetVoice | Shutdown
+UiToBrain = (UserMessage | StartVoiceInput | ImportCharacter | PanicStop | SetControlAllowed | SetVoice | NewChat
+             | OpenChat | SetHidden | Shutdown)
 
 
 # ---- brain → body -------------------------------------------------------------------
@@ -99,6 +130,21 @@ UiToBrain = UserMessage | StartVoiceInput | ImportCharacter | PanicStop | SetCon
 @dataclass(frozen=True)
 class Chat:
     line: ChatLine
+
+
+@dataclass(frozen=True)
+class Transcript:
+    """The chat showing now, from its start (a new chat: empty)."""
+
+    lines: tuple[ChatLine, ...]
+
+
+@dataclass(frozen=True)
+class ChatList:
+    """The chats there are, newest first, and which one is showing."""
+
+    chats: tuple[ChatInfo, ...]
+    current: str
 
 
 @dataclass(frozen=True)
@@ -112,15 +158,20 @@ class WalkTo:
 
 
 @dataclass(frozen=True)
-class ClickAt:
-    x: float
-    y: float
-    double: bool = False
+class Carry:
+    """Her part as she uses the mouse (hands.py): "reach" — stop and raise
+    her arms for the cursor; "hold" — hang from it wherever it goes; "drop"
+    — let go."""
+
+    stage: str
 
 
 @dataclass(frozen=True)
-class TypeText:
-    text: str
+class Hide:
+    """Hide in the corner (or come out): she peeks over the screen's edge
+    until the chat or a task brings her out."""
+
+    on: bool
 
 
 @dataclass(frozen=True)
@@ -183,6 +234,6 @@ class Pose:
 
 
 BrainToUi = (
-    Chat | Emote | WalkTo | ClickAt | TypeText | ControlMode | Animate | Thinking | Listening | Speaking
-    | LoadCharacter | Characters | Status | HealthLock | HealthProgress | Pose
+    Chat | Transcript | ChatList | Emote | WalkTo | Carry | Hide | ControlMode | Animate | Thinking | Listening
+    | Speaking | LoadCharacter | Characters | Status | HealthLock | HealthProgress | Pose
 )

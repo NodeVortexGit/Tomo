@@ -89,6 +89,12 @@ Windows за разрешение (UAC), както при ръчно отвар
   main_program, resembles, windowed / pe_subsystem, program_name,
   clean_name, shortcut_target, merged — помощниците им
   checked_launch(exec, program="") — стартиране с проверка (Windows);
+  confirm_open(exec, program="", since=0) — само проверката, без
+    стартиране: приложението е пуснато от менюто „Старт“ преди до since
+    секунди;
+  running_program(app) — името на програмата, която работи, докато
+    приложението е отворено („chrome“), където се знае без да се пита
+    системата (за close_app);
                          LAUNCH_WAIT_SECS = 8, GAME_WAIT_SECS = 15,
                          LAUNCH_LOOK_MS = 250, LAUNCH_STAYS_MS = 1000
 
