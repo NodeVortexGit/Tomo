@@ -3,7 +3,7 @@
 #
 # Makes Tomo's own Python environment (.venv in Tomo's folder, with uv),
 # installs what Tomo needs into it, and with -Models downloads the speech
-# models (Piper's voices, Vosk and Parakeet) and the pose model. Everything
+# models (Piper's voices, BgTTS, Vosk and Parakeet) and the pose model. Everything
 # runs on this computer; this only needs the internet once. Run it again any
 # time to repair or finish the setup.
 

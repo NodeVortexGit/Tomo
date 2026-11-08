@@ -212,7 +212,8 @@ Environment="LLAMA_ARG_CACHE_RAM=0" "LLAMA_ARG_CTX_CHECKPOINTS=4"
    артефакт `Tomo-Setup-windows` от GitHub Actions). Инсталира се само за
    текущия потребител, без администраторски права, в
    `%LOCALAPPDATA%\Programs\Tomo`. Инсталаторът:
-   - създава собствена Python среда (`.venv`) с **uv** — около 700 MB на диска;
+   - създава собствена Python среда (`.venv`) с **uv** — около 1,2 GB на диска
+     (почти половината е torch за българския глас);
    - по избор изтегля моделите за глас, „Hey Tomo“ и камерата (около 2 GB);
    - по избор изтегля `gemma4:12b-it-qat` за Ollama (около 7,2 GB) и задава
      двете настройки на Ollama за него.
@@ -240,7 +241,7 @@ LM Studio (предлага да изтегли gemma4:12b-it-qat и напом�
 
 ```bash
 uv venv --python 3.12
-uv pip install -r pyproject.toml --extra all --extra dev
+uv pip install --no-sources --torch-backend cpu -r pyproject.toml --extra all --extra dev
 source .venv/bin/activate             # в Windows: .venv\Scripts\activate
 python scripts/setup_models.py        # моделите за реч и камера (еднократно)
 python -m tomo                        # стартира Tomo

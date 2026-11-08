@@ -38,7 +38,7 @@ WizardStyle=modern
 CloseApplications=yes
 
 [Tasks]
-Name: "models"; Description: "Set up Tomo's voice, ""Hey Tomo"" and the health programme's camera (downloads the models, about 1 GB, once)"
+Name: "models"; Description: "Set up Tomo's voice, ""Hey Tomo"" and the health programme's camera (downloads the models, about 2 GB, once)"
 Name: "model"; Description: "Download the model Tomo thinks with, for Ollama (Gemma 4 12B QAT, about 7.2 GB; needs Ollama 0.30.5 or newer)"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 Name: "autostart"; Description: "Start Tomo when I sign in"; Flags: unchecked
@@ -69,8 +69,8 @@ Name: "{userstartup}\Tomo"; Filename: "{app}\.venv\Scripts\pythonw.exe"; Paramet
 
 [Run]
 ; Tomo's Python environment is always needed; the models only if chosen.
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\setup.ps1"""; WorkingDir: "{app}"; StatusMsg: "Setting up Tomo's Python (about 700 MB, once)..."; Flags: waituntilterminated; Tasks: not models
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\setup.ps1"" -Models"; WorkingDir: "{app}"; StatusMsg: "Setting up Tomo's Python, voice and camera (about 1.7 GB, once)..."; Flags: waituntilterminated; Tasks: models
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\setup.ps1"""; WorkingDir: "{app}"; StatusMsg: "Setting up Tomo's Python (about 1.2 GB, once)..."; Flags: waituntilterminated; Tasks: not models
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\setup.ps1"" -Models"; WorkingDir: "{app}"; StatusMsg: "Setting up Tomo's Python, voice and camera (about 3.2 GB, once)..."; Flags: waituntilterminated; Tasks: models
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\get-model.ps1"""; WorkingDir: "{app}"; StatusMsg: "Getting a model for Ollama..."; Flags: waituntilterminated; Tasks: model
 Filename: "{app}\.venv\Scripts\pythonw.exe"; Parameters: "-m tomo"; Description: "Start Tomo"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent
 
