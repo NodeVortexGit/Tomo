@@ -12,7 +12,8 @@ chat. It sends the message; the brain echoes it back, then follows with the
 reply — so the chat, the memory and the model's context stay in step.
 
 Chats: the brain keeps which one is showing. A new chat starts empty, and
-any chat in the history can be opened again to read or carry on; what Tomo
+any chat in the history can be opened again to read or carry on, renamed or
+deleted (the one showing, deleted, makes way for a new one); what Tomo
 knows about the user (preferences and memories) belongs to none of them.
 When the user leaves a chat, the model reads it once more, while Tomo is
 idle, for lasting facts about the user (:class:`ChatMemory`).
@@ -35,7 +36,8 @@ from .commands import Executor
 from .config import Config
 from .db import Store
 from .events import (Attachment, BrainToUi, Characters, Chat, ChatLine, ChatList, ControlMode, Hide, ImportCharacter,
-                     LoadCharacter, NewChat, OpenChat, PanicStop, Role, SetControlAllowed, SetHidden, SetVoice, Shutdown,
+                     DeleteChat, LoadCharacter, NewChat, OpenChat, PanicStop, RenameChat, Role, SetControlAllowed, SetHidden,
+                     SetVoice, Shutdown,
                      Speaking, StartVoiceInput, Status, Transcript, UiToBrain, UserMessage, now_ms)
 from .hands import BodyState
 from .language import Language
@@ -178,6 +180,17 @@ async def run_loop(cfg: Config, inbox: asyncio.Queue, ui, body: BodyState | None
                 memory.left(chat)
                 chat = memory.current = wanted
             show_chat(db, chat, ui)
+        elif isinstance(message, RenameChat):
+            db.rename_chat(message.id, message.title)
+            ui(ChatList(tuple(db.list_chats()), chat))
+        elif isinstance(message, DeleteChat):
+            delete_chat(db, message.id, cfg.data_dir / "attachments")
+            memory.forget(message.id)
+            if message.id == chat:
+                chat = memory.current = new_chat()
+                show_chat(db, chat, ui)
+            else:
+                ui(ChatList(tuple(db.list_chats()), chat))
         elif isinstance(message, SetHidden):
             db.set_snapshot("hidden", "1" if message.on else "0", "")
             ui(Hide(message.on))
@@ -230,6 +243,19 @@ async def attach(cfg: Config, paths: tuple[Path, ...], ui) -> tuple[Attachment, 
 def new_chat() -> str:
     """A new chat's id (it's kept once something is said in it)."""
     return f"chat-{now_ms()}"
+
+
+def delete_chat(db: Store, chat: str, folder: Path) -> None:
+    """Delete a chat, and Tomo's copies of the pictures in it (``folder``):
+    with the chat gone nothing shows them, and they can hold where they were
+    taken. Tomo's own copies only, never the files the user picked."""
+    for picture in db.delete_chat(chat):
+        path = Path(picture.path)
+        if path.parent == folder:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as e:
+                log.warning("couldn't delete the picture %s: %s", path, e)
 
 
 def show_chat(db: Store, chat: str, ui) -> None:
@@ -333,6 +359,11 @@ class ChatMemory:
         """Chats to read when it's quiet."""
         self.waiting += [c for c in chats if c not in self.waiting]
         self.wake.set()
+
+    def forget(self, chat: str) -> None:
+        """A chat that's been deleted: there's nothing left to read."""
+        if chat in self.waiting:
+            self.waiting.remove(chat)
 
     def talked(self) -> None:
         """A turn is over."""

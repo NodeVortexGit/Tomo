@@ -8,14 +8,13 @@ first time — then answers each JSON line on stdin,
   {"text": "Hello!", "out": "/path/to/file.wav", "speed": 1.0, "voice": "en_GB-cori-medium"}
 
 by writing the WAV file and printing {"ok": true}, or {"error": "..."}.
-"voice" picks one of the loaded voices (Tomo sends the Bulgarian one for a
-reply in Bulgarian, and the character's own — male or female — for English);
-without it, or for one that isn't loaded, the first --voice speaks. The first
+"voice" picks one of the loaded voices (Tomo sends the character's own, male
+or female; Bulgarian goes to tts_bgtts.py); without it, or for one that isn't loaded, the first --voice speaks. The first
 line it prints, once the voices are loaded, is {"ok": true, "event": "ready"}.
 
 Try it:
-  echo '{"text": "Здравей!", "out": "hi.wav", "voice": "bg_BG-dimitar-medium"}' |
-    tts_piper.py --voice en_GB-cori-medium --voice en_GB-alan-medium --voice bg_BG-dimitar-medium --voices-dir voices
+  echo '{"text": "Hello!", "out": "hi.wav", "voice": "en_GB-alan-medium"}' |
+    tts_piper.py --voice en_GB-cori-medium --voice en_GB-alan-medium --voices-dir voices
 """
 
 import argparse

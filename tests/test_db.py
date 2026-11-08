@@ -72,6 +72,59 @@ def test_each_chat_keeps_its_own_lines_and_the_history_lists_them(store):
     assert store.recent_messages(5, "new") == []
 
 
+def test_a_chat_can_be_renamed_and_keeps_its_name_and_place(store):
+    store.add_message(ChatLine(Role.USER, "first words", 1000), "a")
+    store.add_message(ChatLine(Role.USER, "other", 2000), "b")
+    store.set_remembered("a", 0)
+    store.rename_chat("a", "  My   holiday\nplans ")
+    a = next(c for c in store.list_chats() if c.id == "a")
+    assert (a.title, a.started_at, a.updated_at, a.count) == ("My holiday plans", 1000, 1000, 1)
+    assert [c.id for c in store.list_chats()] == ["b", "a"], "where it was"
+    assert store.remembered("a") == 0
+    store.rename_chat("a", "   ")
+    store.rename_chat("nothing", "No such chat")
+    assert [c.title for c in store.list_chats()] == ["other", "My holiday plans"]
+    store.add_message(ChatLine(Role.USER, "more words", 3000), "a")
+    assert store.list_chats()[0].title == "My holiday plans", "saying more doesn't change the name"
+    store.rename_chat("a", "x" * 80)
+    assert store.list_chats()[0].title == "x" * 59 + "…"
+
+
+def test_deleting_a_chat_takes_only_its_lines_and_numbers_never_repeat(store):
+    picture = Attachment("x.jpg", "", "")
+    store.add_memory("fact", "The user's dog is called Sharo", 5)
+    store.add_message(ChatLine(Role.USER, "keep one", 1000), "keep")
+    store.add_message(ChatLine(Role.USER, "gone", 2000, (picture,)), "gone")
+    store.add_message(ChatLine(Role.ASSISTANT, "gone too", 2001), "gone")
+    store.add_message(ChatLine(Role.USER, "keep two", 3000), "keep")
+    _, read = store.chat_lines("keep")
+    store.set_remembered("keep", read)
+    assert store.delete_chat("gone") == [picture]
+    assert [c.id for c in store.list_chats()] == ["keep"]
+    assert store.chat_lines("gone") == ([], -1) and not store.search_messages("gone", 5)
+    assert store.delete_chat("gone") == [], "again: nothing there"
+    assert any("Sharo" in m.content for m in store.top_memories(5)), "what Tomo knows about the user stays"
+
+    # A line said now must not take a number that's still in use (as counting
+    # the lines would), and the memory must see it as new.
+    store.add_message(ChatLine(Role.USER, "keep three", 4000), "keep")
+    assert [m.text for m in store.chat_lines("keep")[0]] == ["keep one", "keep two", "keep three"]
+    assert [m.text for m in store.chat_lines("keep", store.remembered("keep"))[0]] == ["keep three"]
+    assert [m.text for m in store.recent_messages(2)] == ["keep two", "keep three"]
+
+
+def test_line_numbers_carry_on_after_reopening_the_memory(tmp_path):
+    from tomo.db import Store
+
+    first = Store(tmp_path / "db")
+    for i, chat in enumerate("aab"):
+        first.add_message(ChatLine(Role.USER, f"line {i}", i), chat)
+    first.delete_chat("a")
+    again = Store(tmp_path / "db")
+    again.add_message(ChatLine(Role.USER, "new", 9), "c")
+    assert [m.text for m in again.recent_messages(5)] == ["line 2", "new"]
+
+
 def test_the_old_single_transcript_becomes_chats_once(store):
     hour = 3600 * 1000
     for i, at in enumerate([0, 60_000, 4 * hour, 4 * hour + 1, 9 * hour]):

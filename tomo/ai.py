@@ -46,7 +46,8 @@ import httpx
 from . import attachments as attached, characters, desktop, platform, screen, sysinfo, volume
 from .apps import DesktopApp, SystemCatalog, checked_launch, confirm_open, running_program
 from .commands import Executor
-from .config import DEFAULT_VOICE_BG, DEFAULT_VOICE_FEMALE, DEFAULT_VOICE_MALE, Config, LlmProvider
+from .config import (DEFAULT_VOICE_BG_FEMALE, DEFAULT_VOICE_BG_MALE, DEFAULT_VOICE_FEMALE, DEFAULT_VOICE_MALE, Config,
+                     LlmProvider)
 from .db import Store
 from .events import (Animate, Attachment, BrainToUi, Characters, Chat, ChatLine, Emote, Hide, LoadCharacter, Role,
                      Thinking, WalkTo)
@@ -60,7 +61,7 @@ MAX_TOOL_ROUNDS = 6
 # No more tool rounds after this long: the user is waiting.
 TURN_BUDGET = 60.0
 # Tools that act on the computer, whose results say whether that worked.
-ACTIONS = ("execute_command", "open_app", "close_app", "set_volume", "toggle_system")
+ACTIONS = ("execute_command", "open_app", "close_app", "window_state", "set_volume", "toggle_system")
 # Tools that only move the body: done at once, nothing to report back.
 GESTURES = ("express", "animate", "walk_to", "hide")
 # Opening an app with the mouse goes through the Start menu, which knows
@@ -69,6 +70,8 @@ START_MENU_SOURCES = ("start menu", "apps folder")
 START_OPENS_SECS = 2.0  # for the Start menu to open after the click…
 START_SEARCH_SECS = 1.2  # …and to find the app once its name is typed
 CLOSE_WAIT_SECS = 3.0  # for a window to close after its close button
+PANEL_OPENS_SECS = 1.5  # for the speaker icon's panel to open…
+VOLUME_SHOWN_SECS = 1.0  # …and how long it shows the new volume before it closes
 MAX_CLOSED_WINDOWS = 4  # an app's windows closed one by one; any more are asked all at once
 MEMORY_PASS = ("You keep the long-term memory of {name}, an assistant who lives on the user's computer. Read the "
                "conversation below. Call remember once for each lasting fact about the user in it that isn't "
@@ -176,7 +179,8 @@ class AiClient:
 
     def tools(self) -> list[dict]:
         cfg = self.cfg
-        return tool_specs(cfg.allow_screen, (cfg.tts_voice_male, cfg.tts_voice_female, cfg.tts_voice_bg))
+        return tool_specs(cfg.allow_screen,
+                          (cfg.tts_voice_male, cfg.tts_voice_female, cfg.tts_voice_bg_male, cfg.tts_voice_bg_female))
 
     # ---- a turn ---------------------------------------------------------------------
 
@@ -376,7 +380,8 @@ class AiClient:
             f"   c. Read the result. {not_opened} means it did not open: tell the user so and why, never that it "
             "opened, and don't try to start it another way.\n"
             "3. To close an app, use close_app: it closes the app's windows with their close button, as a person "
-            "would, so the app can ask to save first. Stop-Process only if the user asks you to force it.\n"
+            "would, so the app can ask to save first. Stop-Process only if the user asks you to force it. To "
+            "minimize, maximize or restore a window, use window_state.\n"
             f"4. Use the other dedicated tools where they fit: set_volume for the volume, {switches}find_on_screen "
             "then click_at for a visible click, hide when the user wants you out of the way. Everything else goes "
             "through execute_command, finding things out too (the time, free disk space, what's running): look "
@@ -647,8 +652,9 @@ class AiClient:
             who = characters.set_voice(self.db, voice)
             if who is None:
                 return "there's no character showing to give a voice"
-            piper = self.cfg.tts_voice_male if voice == "male" else self.cfg.tts_voice_female
-            return f"{who} now speaks English in the {voice} voice ({piper}); Bulgarian stays {self.cfg.tts_voice_bg}"
+            english, bulgarian = ((self.cfg.tts_voice_male, self.cfg.tts_voice_bg_male) if voice == "male"
+                                  else (self.cfg.tts_voice_female, self.cfg.tts_voice_bg_female))
+            return f"{who} now speaks in the {voice} voice: {english} in English, {bulgarian} in Bulgarian"
         if name == "list_apps":
             hits = catalog.find_app(str(args.get("query") or ""))
             if not hits:
@@ -670,7 +676,7 @@ class AiClient:
             on = bool(args.get("on", True))
             ui(Hide(on))
             self.db.set_snapshot("hidden", "1" if on else "0", "")
-            return "hiding in the corner" if on else "out of the corner"
+            return "hiding at the side of the screen" if on else "back out"
         if name == "click_at":
             if not self.control_allowed.is_set():
                 return "mouse/keyboard control is switched off by the user"
@@ -711,7 +717,13 @@ class AiClient:
             line = volume.command(change)
             if line is None:
                 return "this system has no volume control Tomo can use (install wpctl or pactl)"
+            changing = change.level is not None or change.by is not None or change.mute is not None
+            if changing and self.cfg.use_mouse and platform.WINDOWS:
+                return await self.volume_with_hands(line, ui)
             return (await self.executor.run(line)).summary()
+        if name == "window_state":
+            wanted, action = str(args.get("name") or "").strip(), str(args.get("action") or "").strip().lower()
+            return await self.arrange_window(wanted, action, ui) if wanted else "which app? give its name"
         if name in ("look_at_screen", "find_on_screen"):
             return "looking at the screen is switched off by the user"
         return f"unknown tool: {name}"
@@ -766,12 +778,7 @@ class AiClient:
         one's close button and click it — or, where a window doesn't say
         where that is, ask it to close the way the button would. A window
         that stays open is left be (it's likely asking about unsaved work)."""
-        hits = self.catalog.get().find_app(wanted)
-        app = hits[0] if hits else None
-        name = app.name if app is not None else wanted
-        windows = await asyncio.to_thread(desktop.app_windows, running_program(app) if app else "", name)
-        if not windows and app is not None:
-            windows = await asyncio.to_thread(desktop.app_windows, "", wanted)
+        name, windows = await self.windows_of(wanted)
         if not windows:
             return f"NOT OPEN: no window of {name} is open, so there's nothing to close"
         hands = self.hands(ui)
@@ -789,29 +796,92 @@ class AiClient:
             return (f"NOT CLOSED: {'; '.join(left)}. Tell the user; don't force it closed unless they ask.")
         return f"CLOSED: {name} ({len(windows)} window{'s' if len(windows) > 1 else ''})"
 
+    async def windows_of(self, wanted: str) -> tuple[str, list[desktop.AppWindow]]:
+        """An app's name and its open windows, the frontmost first: by the
+        program the catalogue says it runs, else by the name asked for."""
+        hits = self.catalog.get().find_app(wanted)
+        app = hits[0] if hits else None
+        name = app.name if app is not None else wanted
+        windows = await asyncio.to_thread(desktop.app_windows, running_program(app) if app else "", name)
+        if not windows and app is not None:
+            windows = await asyncio.to_thread(desktop.app_windows, "", wanted)
+        return name, windows
+
     async def close_window(self, window: desktop.AppWindow, hands: Hands) -> str | None:
         """Close one window; what's in the way if it stays open (None: closed)."""
         await asyncio.to_thread(desktop.bring_forward, window)
         await asyncio.sleep(0.25)
-        button = await asyncio.to_thread(desktop.close_button, window)
-        if self.cfg.use_mouse and hands.able() and platform.WINDOWS:
-            async with hands.task():
-                await hands.carry_to(*(button or desktop.corner(window)))
-                # A real click only where the window itself says its close
-                # button is, and nothing covers it there.
-                if button is not None and desktop.shows_at(window, *button):
-                    await hands.click()
-                    log.info("closing “%s” with its close button", window.title)
-                else:
-                    desktop.ask_to_close(window)
-                    log.info("closing “%s”: asked (its close button %s)", window.title,
-                             "is covered" if button else "isn't said")
-        else:
-            desktop.ask_to_close(window)
+        await self.press(window, "close", "close", hands)
         if await until(lambda: not desktop.is_open(window), CLOSE_WAIT_SECS):
             return None
         dialog = desktop.dialog_of(window)
         return f"is asking “{dialog}”" if dialog else "is still open (it may be asking whether to save)"
+
+    async def arrange_window(self, wanted: str, action: str, ui: Ui) -> str:
+        """Minimize, maximize or restore an app's frontmost window with its
+        own buttons, the cursor carried there; the result says what it is
+        now."""
+        goal = {"minimize": "minimized", "maximize": "maximized", "restore": "normal"}.get(action)
+        if goal is None:
+            return "the action must be minimize, maximize or restore"
+        name, windows = await self.windows_of(wanted)
+        if not windows:
+            return f"NOT OPEN: no window of {name} is open"
+        window = windows[0]
+        if desktop.state(window) == goal:
+            return f"DONE: “{window.title}” is {goal} already"
+        hands = self.hands(ui)
+        try:
+            # A minimised window's buttons are out of sight: it comes back first.
+            await asyncio.to_thread(desktop.bring_forward, window)
+            await asyncio.sleep(0.25)
+            if desktop.state(window) != goal:
+                # Maximize and restore are the same button, back and forth.
+                await self.press(window, "minimize" if action == "minimize" else "maximize", action, hands)
+        except Stopped:
+            return STOPPED
+        if await until(lambda: desktop.state(window) == goal, 2.0):
+            return f"DONE: “{window.title}” is {goal}"
+        return f"NOT DONE: “{window.title}” is still {desktop.state(window)}"
+
+    async def press(self, window: desktop.AppWindow, which: str, action: str, hands: Hands) -> None:
+        """Carry the cursor to one of the window's buttons and click it — a
+        real click only where the window itself says that button is and
+        nothing covers it there; otherwise the window is asked to ``action``
+        the way the button would ask it."""
+        spot = await asyncio.to_thread(desktop.button, window, which)
+        if self.cfg.use_mouse and hands.able() and platform.WINDOWS:
+            async with hands.task():
+                await hands.carry_to(*(spot or desktop.corner(window, which)))
+                if spot is not None and desktop.shows_at(window, *spot):
+                    await hands.click()
+                    log.info("%s “%s” with its %s button", action, window.title, which)
+                    return
+                log.info("%s “%s”: asked (its %s button %s)", action, window.title, which,
+                         "is covered" if spot else "isn't said")
+        desktop.ask(window, action)
+
+    async def volume_with_hands(self, line: str, ui: Ui) -> str:
+        """Change the volume where the user can watch: the cursor goes to the
+        speaker icon by the clock and opens its panel, the exact level is
+        set (the panel's slider follows), and the panel closes again."""
+        hands = self.hands(ui)
+        point = await asyncio.to_thread(desktop.volume_button) if hands.able() else None
+        if point is None:
+            return (await self.executor.run(line)).summary()
+        try:
+            async with hands.task():
+                await hands.carry_to(*point)
+                await hands.click()
+                opened = await until(desktop.panel_open, PANEL_OPENS_SECS)
+                result = (await self.executor.run(line)).summary()
+                if opened:
+                    await asyncio.sleep(VOLUME_SHOWN_SECS)  # the slider moves where the user sees it
+                    if desktop.panel_open():
+                        await hands.key("escape")
+        except Stopped:
+            return STOPPED
+        return result
 
 
 STOPPED = "STOPPED: the user took the mouse back with the panic key; nothing more was done"
@@ -885,7 +955,7 @@ def action_failed(result: str) -> bool:
     """Whether an action's result says it didn't work (or that it couldn't
     be confirmed: an app that was started but isn't running)."""
     return (result.startswith(("REFUSED", "TIMEOUT", "no installed app", "no '", "this system has no", "NOT OPEN",
-                               "NOT CLOSED", "STOPPED"))
+                               "NOT CLOSED", "NOT DONE", "STOPPED"))
             or (result.startswith("exit=") and result != "exit=0" and not result.startswith("exit=0\n"))
             or "NOT CONFIRMED:" in result)
 
@@ -1163,7 +1233,8 @@ def truncate_err(text: str) -> str:
 
 
 def tool_specs(allow_screen: bool,
-               voices: tuple[str, str, str] = (DEFAULT_VOICE_MALE, DEFAULT_VOICE_FEMALE, DEFAULT_VOICE_BG)
+               voices: tuple[str, str, str, str] = (DEFAULT_VOICE_MALE, DEFAULT_VOICE_FEMALE,
+                                                    DEFAULT_VOICE_BG_MALE, DEFAULT_VOICE_BG_FEMALE)
                ) -> list[dict]:
     """The tools, in the function format both APIs share. Kept short: the
     model reads all of this every turn. ``voices``: the Piper voices, male,
@@ -1195,8 +1266,8 @@ def tool_specs(allow_screen: bool,
                  ["clip"]),
         function("change_character", "Change the 3D character you appear as; no name lists them.",
                  {"name": string}, []),
-        function("set_voice", f"Your English Piper voice, to suit the character you appear as: male ({voices[0]}) "
-                              f"or female ({voices[1]}). Bulgarian is always {voices[2]}.",
+        function("set_voice", f"Your voice, to suit the character you appear as: male ({voices[0]} in English, "
+                              f"{voices[2]} in Bulgarian) or female ({voices[1]} in English, {voices[3]} in Bulgarian).",
                  {"voice": {"type": "string", "enum": ["male", "female"]}}, ["voice"]),
         function("list_apps", "Search installed apps by name.", {"query": string}, ["query"]),
         function("open_app", "Open an installed app by its name here, e.g. 'Word'; the result says if it's running. "
@@ -1204,7 +1275,10 @@ def tool_specs(allow_screen: bool,
                  {"name": string}, ["name"]),
         function("close_app", "Close an open app's windows with their close button, e.g. 'Chrome'; the result says "
                               "if they closed.", {"name": string}, ["name"]),
-        function("hide", "Hide in the corner of the screen, out of the way (on false: come back out).",
+        function("window_state", "Minimize, maximize or restore an open app's window with its own buttons.",
+                 {"name": string, "action": {"type": "string", "enum": ["minimize", "maximize", "restore"]}},
+                 ["name", "action"]),
+        function("hide", "Hide at the side of the screen, out of the way (on false: come back out).",
                  {"on": boolean}, []),
         function("click_at", "Click a screen point from find_on_screen with the real mouse (if the user allowed control).",
                  {"x": number, "y": number, "double": boolean}, ["x", "y"]),

@@ -14,7 +14,7 @@ them:
 * :mod:`.animation` — bones and face from what she's doing.
 * :mod:`.springs` — hair and clothes swinging with the motion.
 * :mod:`.mtoon` and :mod:`.renderer` — drawing her with VRM's toon shading.
-* :mod:`.ui`, :mod:`.chat`, :mod:`.workout`, :mod:`.control` — the chat
-  window, the lock screen, the mouse/keyboard control badge.
+* :mod:`.ui`, :mod:`.chat`, :mod:`.workout` — the chat window and the lock
+  screen; :mod:`.control` — her part when she uses the mouse.
 * :mod:`.app` — the loop that ties them together.
 """

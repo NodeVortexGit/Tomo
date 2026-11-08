@@ -1,7 +1,7 @@
 МОДУЛ: tomo/body/control.py
 ЧАСТ: Тяло — нейната част, докато използва мишката
 НАКРАТКО: Тя вдига ръце за курсора, виси от него, докато той лети, и го
-пуска; червеният знак и спешният клавиш.
+пуска; спешният клавиш.
 
 1. ЗА КАКВО СЛУЖИ
 Когато Tomo отваря или затваря приложение или кликва нещо (само ако
@@ -22,19 +22,20 @@
     е бил точно там.
   Carry("drop") → let_go(): пуска се (loco.release — пада с люлеенето, което
     е имала) и вече не е заета (held = False).
-  ControlMode → active: червеният знак (draw_badge) „Tomo is controlling the
-    desktop · press Pause to stop“. app.py през това време прави прозореца
-    пропусклив за кликвания (window.click_through), за да стигат кликванията
-    ѝ до приложенията отдолу, дори под нея или под чата.
-  Спешният клавиш (panic): Pause или Ctrl+Alt+Esc → тя пуска курсора, знакът
-    изчезва и мозъкът получава PanicStop (съгласието се отнема веднага —
+  ControlMode → active: app.py през това време прави прозореца пропусклив
+    за кликвания (window.click_through), за да стигат кликванията ѝ до
+    приложенията отдолу, дори под нея или под чата. (Червеният знак „Tomo is
+    controlling the desktop“ е махнат по желание на собственика на проекта:
+    тя самата носи курсора пред очите на потребителя.)
+  Спешният клавиш (panic): Pause или Ctrl+Alt+Esc → тя пуска курсора и
+    мозъкът получава PanicStop (съгласието се отнема веднага —
     BrainHandle.send, — така че движението на курсора спира по средата). В
     Windows, докато Tomo управлява, клавишът работи отвсякъде
     (panic_pressed_anywhere, GetAsyncKeyState).
 
 3. ОСНОВНИ ЕЛЕМЕНТИ
   Control (active, carrying, reached_for; .receive, .update, .hands,
-    .let_go, .panic, .draw_badge)
+    .let_go, .panic)
   panic_pressed_anywhere()
   HANDS_UP = 0.55, RAISE_SECS = 0.3 s
 

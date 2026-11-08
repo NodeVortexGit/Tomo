@@ -100,9 +100,22 @@ OPEN, а set_volume — прочетения звук.
     молба за затваряне (SC_CLOSE). После до 3 s чака прозорецът да изчезне.
     Останал ли е — „NOT CLOSED: “… is asking “Save changes?”““ (или „may be
     asking whether to save“) и указание да не се затваря насила.
+  window_state(name, action) → arrange_window(): най-предния прозорец на
+    приложението смалява (minimize), уголемява (maximize) или възстановява
+    (restore) с неговите бутони — press() отнася курсора до бутона, който
+    прозорецът сам посочва (desktop.button: HTMINBUTTON / HTMAXBUTTON;
+    уголемяването и възстановяването са един и същи бутон), иначе
+    ShowWindow (някои приложения със собствена рамка, като Discord,
+    пренебрегват молбата WM_SYSCOMMAND). Смален прозорец първо се връща (бутоните му не се
+    виждат). Резултат: DONE / NOT DONE / NOT OPEN.
+  set_volume с промяна → volume_with_hands(): курсорът отива до иконата на
+    високоговорителя до часовника (desktop.volume_button, UI Automation) и
+    кликва; ако панелът ѝ се отвори (клавиатурата е у ShellHost), точната
+    сила се задава с командата, плъзгачът се мести 1 s пред очите на
+    потребителя и панелът се затваря с Escape. Само прочитане — без мишката.
   click_at → тя отнася курсора до точката и кликва (hands.click_at);
-    type_text → пише, със знака за управление. Клавишът Pause спира всичко
-    насред движението: резултатът е „STOPPED: …“.
+    type_text → пише. Клавишът Pause спира всичко насред движението:
+    резултатът е „STOPPED: …“.
 
 Паметта между чатовете: respond(text, ui, images, chat) чете само
 последните реплики на текущия чат. remember_chat(lines) — отделна кратка
@@ -147,11 +160,12 @@ change_character. Проверено с истинския модел: 6 от 6 
 
 Изпълнение на инструментите (dispatch_tool): виж Приложение А в README.md —
 execute_command, remember, set_preference, recall, walk_to, express,
-animate, change_character, set_voice, list_apps, open_app, close_app, hide,
-click_at, type_text, set_volume, look_at_screen, find_on_screen (+
-toggle_system в Linux). hide(on) скрива персонажа в ъгъла (или го връща) и
+animate, change_character, set_voice, list_apps, open_app, close_app,
+window_state, hide, click_at, type_text, set_volume, look_at_screen,
+find_on_screen (+ toggle_system в Linux). hide(on) скрива персонажа встрани
+(или го връща) и
 се помни (snapshot „hidden“). set_voice(voice: male|female) дава глас на показания персонаж;
-описанието му назовава гласовете на Piper (Alan, Cori, Dimitar).
+описанието му назовава гласовете (Alan и bgtts-male, Cori и bgtts-female).
 
 3. ОСНОВНИ ЕЛЕМЕНТИ
   AiClient(cfg, db, executor, catalog, control_allowed, http=None,
@@ -184,7 +198,7 @@ characters, language, events, config.
 Използва се от: brain, ask.
 
 5. ТЕСТОВЕ
-tests/test_ai.py (40 теста) — с фалшив сървър (httpx.MockTransport):
+tests/test_ai.py (42 теста) — с фалшив сървър (httpx.MockTransport):
 редът на репликите, търсенето на сървър, изборът на модел (и предпочитането
 на gemma4:12b-it-qat), двата API, <think>, извиквания в текста, напомнянето при
 обещание, проверката при невярно твърдение, пазенето на модела след грешка,

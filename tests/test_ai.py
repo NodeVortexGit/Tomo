@@ -332,14 +332,13 @@ def test_the_persona_knows_the_computer_the_character_and_its_voice(tmp_path):
 def test_set_voice_offers_the_piper_voices_and_gives_the_character_one(tmp_path):
     spec = next(t for t in tool_specs(False) if t["function"]["name"] == "set_voice")["function"]
     assert spec["parameters"]["properties"]["voice"]["enum"] == ["male", "female"]
-    assert all(v in spec["description"] for v in ("en_GB-alan-medium", "en_GB-cori-medium", "bg_BG-dimitar-medium"))
+    assert all(v in spec["description"] for v in ("en_GB-alan-medium", "en_GB-cori-medium", "bgtts-male", "bgtts-female"))
     ai_client = client(tmp_path, FakeServer([]))
     set_voice = lambda voice: asyncio.run(ai_client.dispatch_tool("set_voice", {"voice": voice}, []))  # noqa: E731
     assert "no character" in set_voice("male")
     ai_client.db.add_character("Ayako", str(tmp_path / "a.vrm"))
     ai_client.db.set_active_character("Ayako")
-    assert set_voice("male") == ("Ayako now speaks English in the male voice (en_GB-alan-medium); "
-                                 "Bulgarian stays bg_BG-dimitar-medium")
+    assert set_voice("male") == "Ayako now speaks in the male voice: en_GB-alan-medium in English, bgtts-male in Bulgarian"
     assert characters.voice_of(ai_client.db) == "male"
     assert set_voice("robot") == "the voice must be male or female"
 
@@ -452,8 +451,10 @@ def screen(monkeypatch, mouse):
     monkeypatch.setattr(hands, "click", click)
     monkeypatch.setattr(desktop, "open_windows", lambda: [w for w in state["windows"] if w.handle not in state["closed"]])
     monkeypatch.setattr(desktop, "bring_forward", lambda window: None)
-    monkeypatch.setattr(desktop, "close_button", lambda window: (window.handle * 100, 10) if window.handle < 9 else None)
-    monkeypatch.setattr(desktop, "corner", lambda window: (window.handle * 100 - 3, 15))
+    buttons = {"close": 0, "maximize": 40, "minimize": 80}
+    monkeypatch.setattr(desktop, "button",
+                        lambda window, which: (window.handle * 100 - buttons[which], 10) if window.handle < 9 else None)
+    monkeypatch.setattr(desktop, "corner", lambda window, which="close": (window.handle * 100 - 3, 15))
     monkeypatch.setattr(desktop, "shows_at", lambda window, x, y: True)
     monkeypatch.setattr(desktop, "ask_to_close", ask)
     monkeypatch.setattr(desktop, "is_open", lambda window: window.handle not in state["closed"])
@@ -552,10 +553,10 @@ def test_if_the_start_menu_doesnt_open_the_app_starts_directly(tmp_path, screen,
 def test_hiding_is_a_gesture_that_is_kept(tmp_path):
     client_ = client(tmp_path, FakeServer([]))
     cues = []
-    assert asyncio.run(client_.dispatch_tool("hide", {"on": True}, cues.append)) == "hiding in the corner"
+    assert asyncio.run(client_.dispatch_tool("hide", {"on": True}, cues.append)) == "hiding at the side of the screen"
     assert cues == [Hide(True)] and client_.db.get_snapshot("hidden")[0] == "1"
     assert "hide" in ai.GESTURES and "close_app" in ai.ACTIONS
-    assert {"close_app", "hide"} <= set(tool_names(tool_specs(False)))
+    assert {"close_app", "window_state", "hide"} <= set(tool_names(tool_specs(False)))
 
 
 def test_recall_searches_the_earlier_chats_too(tmp_path):
@@ -609,3 +610,60 @@ def test_the_memory_reads_a_left_chat_once_then_only_whats_new(tmp_path):
     assert read[-1] == ["and a cat"], "then only what's new"
     asyncio.run(memory.read("never-used"))
     assert len(read) == 3
+
+
+def test_a_window_is_minimized_and_maximized_with_its_own_buttons(tmp_path, screen, mouse, monkeypatch):
+    states = {1: "normal"}
+    pressed = []
+
+    def click(times=1):
+        mouse["clicks"] += times
+        at = mouse["at"]
+        if at == (60, 10):  # its maximize button, which also restores (minimize is at 20)
+            states[1] = "normal" if states[1] == "maximized" else "maximized"
+        elif at == (20, 10):
+            states[1] = "minimized"
+        pressed.append(at)
+
+    from tomo import hands
+    monkeypatch.setattr(hands, "click", click)
+    monkeypatch.setattr(desktop, "state", lambda window: states[window.handle])
+    monkeypatch.setattr(desktop, "bring_forward", lambda window: states.update({1: "normal"}) if states[1] == "minimized" else None)
+    screen["windows"] = [AppWindow(1, "Docs - Google Chrome", "chrome")]
+    client_ = hands_on(tmp_path)
+    result = asyncio.run(client_.dispatch_tool("window_state", {"name": "chrome", "action": "maximize"}, ignore))
+    assert result == "DONE: “Docs - Google Chrome” is maximized" and pressed == [(60, 10)]
+    result = asyncio.run(client_.dispatch_tool("window_state", {"name": "chrome", "action": "restore"}, ignore))
+    assert result.endswith("is normal") and pressed[-1] == (60, 10), "the same button, back"
+    result = asyncio.run(client_.dispatch_tool("window_state", {"name": "chrome", "action": "minimize"}, ignore))
+    assert result.endswith("is minimized") and pressed[-1] == (20, 10)
+    # Minimised, it comes back first; restoring it is then done already.
+    assert asyncio.run(client_.dispatch_tool("window_state", {"name": "chrome", "action": "restore"}, ignore)).startswith("DONE")
+    assert "already" in asyncio.run(client_.dispatch_tool("window_state", {"name": "chrome", "action": "restore"}, ignore))
+    assert asyncio.run(client_.dispatch_tool("window_state", {"name": "Word", "action": "minimize"}, ignore)).startswith("NOT OPEN")
+
+
+def test_the_volume_changes_with_the_speaker_icons_panel_open(tmp_path, screen, mouse, monkeypatch):
+    monkeypatch.setattr(desktop, "volume_button", lambda: (1814, 1056))
+    panel = {"open": False}
+    from tomo import hands
+
+    def click(times=1):
+        mouse["clicks"] += times
+        panel["open"] = mouse["at"] == (1814, 1056)
+
+    def press(key):
+        mouse["keys"].append(key)
+        panel["open"] = False
+
+    monkeypatch.setattr(hands, "click", click)
+    monkeypatch.setattr(hands, "press", press)
+    monkeypatch.setattr(desktop, "panel_open", lambda: panel["open"])
+    monkeypatch.setattr(ai, "VOLUME_SHOWN_SECS", 0.0)
+    client_ = hands_on(tmp_path, lambda line: "volume=30 muted=False")
+    result = asyncio.run(client_.dispatch_tool("set_volume", {"level": 30}, ignore))
+    assert "volume=30" in result and mouse["clicks"] == 1 and mouse["keys"] == ["escape"], "opened, set, closed"
+    assert "[TomoVolume]::Level = 30" in client_.executor.lines[0]
+    mouse["moves"].clear()
+    asyncio.run(client_.dispatch_tool("set_volume", {}, ignore))
+    assert mouse["moves"] == [], "only reading it: no mouse"

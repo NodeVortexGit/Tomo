@@ -8,7 +8,10 @@
   Основни (мозък + тяло): httpx, python-dotenv, chromadb, numpy, pillow,
     glfw, moderngl, imgui-bundle.
   Допълнения:
-    speech — piper-tts, vosk, onnx-asr[cpu,hub], sounddevice (без Linux);
+    speech — piper-tts, torch, torchaudio, soundfile, miocodec (от GitHub, на
+             фиксиран commit), vosk, onnx-asr[cpu,hub], sounddevice (без Linux);
+             инсталаторите слагат torch за процесора (--no-sources
+             --torch-backend cpu);
     camera — opencv-python, mediapipe;
     all    — speech + camera (това инсталират инсталаторите);
     dev    — pytest.

@@ -1,23 +1,30 @@
 МОДУЛ: tomo/speech.py
 ЧАСТ: Мозък — гласът на Tomo (изходяща реч)
-НАКРАТКО: Превръща отговорите в глас с Piper и ги възпроизвежда. Гласът
+НАКРАТКО: Превръща отговорите в глас и ги възпроизвежда. Гласът
 зависи от езика на отговора и от персонажа.
 
 1. ЗА КАКВО СЛУЖИ
 Tomo говори. Гласът се избира с обикновено if/elif/else (voice_for):
-  if   отговорът е на български  → bg_BG-dimitar-medium (Dimitar)
-  elif персонажът е мъжки        → en_GB-alan-medium   (Alan)
-  else (женски или неизбран)     → en_GB-cori-medium   (Cori)
+  if   отговорът е на български
+      if персонажът е мъжки      → bgtts-male          (BgTTS-38M-V2)
+      else (женски или неизбран) → bgtts-female        (BgTTS-38M-V2)
+  elif персонажът е мъжки        → en_GB-alan-medium   (Alan, Piper)
+  else (женски или неизбран)     → en_GB-cori-medium   (Cori, Piper)
 Дали персонажът е мъжки или женски решава моделът (виж 14-tomo.characters
 и 05-tomo.ai: ensure_voice, set_voice); Speech го пита чрез функцията
 gender, която мозъкът му подава (characters.voice_of).
 
 2. КАК РАБОТИ
-Piper работи в помощния процес scripts/tts_piper.py, пуснат веднъж — още
-при стартиране (warm_up), за да не чака първият отговор: той зарежда трите
-гласа (TOMO_TTS_VOICE_FEMALE, TOMO_TTS_VOICE_MALE, TOMO_TTS_VOICE_BG) и за
-всеки ред JSON {"text", "out", "voice", "speed"}
-пише WAV файл и отговаря {"ok": true}. Възпроизвеждане: winsound в Windows;
+Гласовете работят в два помощни процеса (Helper), пуснати веднъж — още при
+стартиране (warm_up), за да не чака първият отговор: scripts/tts_piper.py
+(TOMO_TTS_VOICE_FEMALE, TOMO_TTS_VOICE_MALE) и scripts/tts_bgtts.py
+(TOMO_TTS_VOICE_BG_FEMALE, TOMO_TTS_VOICE_BG_MALE). Всеки зарежда гласовете си
+и за всеки ред JSON {"text", "out", "voice"} (за Piper и "speed") пише WAV файл
+и отговаря {"ok": true}. Единият може да не работи, без това да пречи на
+другия.
+numbers_in_bulgarian() прави цифрите на думи, преди текстът да стигне до BgTTS
+(той няма звук за тях): 40% → четиридесет процента, 2 часа → два часа, 15:30 →
+петнадесет и тридесет, 007 → нула нула седем. Възпроизвеждане: winsound в Windows;
 първият наличен от pw-play, paplay, aplay, mpv, ffplay в Linux; afplay в
 macOS. След края файлът
 се трие.
@@ -28,14 +35,16 @@ speakable() подготвя текста за четене на глас: ма�
 3. ОСНОВНИ ЕЛЕМЕНТИ
   Speech(cfg, python=None, gender=None)
     .voice_for(text)     — if/elif/else-то по-горе
-    .warm_up()           — пуска помощния процес веднага (async)
+    .warm_up()           — пуска помощните процеси веднага (async)
     .synthesize(text)    — WAV файл (async)
     .play(path)          — изсвирва и изчаква края (async)
     .first_failure_note()— какво да се каже на потребителя при първата грешка
-  speakable, link_words, is_emoji, play_wav
+  Helper(python, script, args, timeout) — един помощен процес
+  speakable, link_words, is_emoji, play_wav, numbers_in_bulgarian, number_words
 
 4. ВРЪЗКИ
-Използва: platform (helper_python, quiet_flags), language, scripts/tts_piper.py.
+Използва: platform (helper_python, quiet_flags), language, scripts/tts_piper.py,
+scripts/tts_bgtts.py.
 Използва се от: brain (отговорите), health (броенето на глас), ask (--speak).
 
 5. ТЕСТОВЕ

@@ -32,7 +32,9 @@
   SetVoice(on)             — гласът в чата включен/изключен
   NewChat()                — нов чат (каквото Tomo знае за потребителя остава)
   OpenChat(id)             — отвори чат от историята
-  SetHidden(on)            — скрий я в ъгъла / изведи я
+  RenameChat(id, title)    — дай име на чат
+  DeleteChat(id)           — изтрий чат завинаги (каквото Tomo знае за потребителя остава)
+  SetHidden(on)            — скрий я встрани / изведи я
   Shutdown()               — изход
 
 Мозък → тяло (BrainToUi):
@@ -44,9 +46,9 @@
   Carry(stage)             — нейната част, докато мозъкът движи мишката:
                              reach (вдигни ръце), hold (висни от
                              курсора), drop (пусни го) — виж 40-tomo.hands
-  Hide(on)                 — скрий се в ъгъла / излез
-  ControlMode(on)          — червеният знак за управление (и прозорецът ѝ
-                             пропуска кликванията)
+  Hide(on)                 — скрий се встрани / излез
+  ControlMode(on)          — тя използва мишката: прозорецът ѝ пропуска
+                             кликванията
   Animate(clip)            — wave, nod, shrug, sit, lie_down, jump, idle
   Thinking(on), Listening(on), Speaking(on)
   LoadCharacter(path)      — зареди този .vrm

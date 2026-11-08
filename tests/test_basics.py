@@ -156,16 +156,131 @@ def test_a_reply_is_spoken_in_its_language_and_the_characters_voice(tmp_path):
     gender = ["female"]
     s = speech.Speech(Config.for_tests(tmp_path), gender=lambda: gender[0])
     bulgarian, english = "Готово, звукът е на 40%.", "Done, the volume's at 40%."
-    # Bulgarian is Dimitar for every character; English follows the character.
-    assert s.voice_for(bulgarian) == "bg_BG-dimitar-medium"
+    # Both languages follow the character.
+    assert s.voice_for(bulgarian) == "bgtts-female"
     assert s.voice_for(english) == "en_GB-cori-medium"
     gender[0] = "male"
-    assert s.voice_for(bulgarian) == "bg_BG-dimitar-medium"
+    assert s.voice_for(bulgarian) == "bgtts-male"
     assert s.voice_for(english) == "en_GB-alan-medium"
     # Before the model has chosen a character's voice: the female one.
     gender[0] = ""
+    assert s.voice_for(bulgarian) == "bgtts-female"
     assert s.voice_for(english) == "en_GB-cori-medium"
     assert speech.Speech(Config.for_tests(tmp_path)).voice_for(english) == "en_GB-cori-medium"
+
+
+def test_deleting_a_chat_takes_tomos_copies_of_its_pictures_and_no_other_file(tmp_path):
+    from tomo import brain
+    from tomo.db import Store
+    from tomo.events import Attachment, ChatLine as Line, Role as Who
+
+    folder = tmp_path / "attachments"
+    folder.mkdir()
+    (mine := folder / "mine.jpg").write_bytes(b"x")
+    (other_chat := folder / "other.jpg").write_bytes(b"x")
+    (users := tmp_path / "users.jpg").write_bytes(b"x")
+    db = Store(None)
+    db.add_message(Line(Who.USER, "", 1, (Attachment(str(mine), str(users), ""), Attachment(str(users), "", ""),
+                                          Attachment(str(folder / "gone-already.jpg"), "", ""))), "a")
+    db.add_message(Line(Who.USER, "", 2, (Attachment(str(other_chat), "", ""),)), "b")
+    brain.delete_chat(db, "a", folder)
+    assert not mine.exists() and other_chat.exists() and users.exists()
+    assert [c.id for c in db.list_chats()] == ["b"]
+
+
+def test_the_memory_doesnt_try_to_read_a_deleted_chat():
+    from tomo import brain
+
+    memory = brain.ChatMemory(None, None, "now")
+    memory.left("a", "b")
+    memory.forget("a")
+    memory.forget("never-there")
+    assert memory.waiting == ["b"]
+
+
+def fake_helper(path, name):
+    """A voice helper that writes down what it's asked to say, and fails on "boom"."""
+    script = path / name
+    script.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "sys.stdin.reconfigure(encoding='utf-8')\n"
+        "print(json.dumps({'ok': True, 'event': 'ready'}), flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    r = json.loads(line)\n"
+        "    if 'boom' in r['text']:\n"
+        "        print(json.dumps({'error': 'it went boom'}), flush=True)\n"
+        "        continue\n"
+        f"    Path(r['out']).write_text({name!r} + '|' + r['voice'] + '|' + r['text'], encoding='utf-8')\n"
+        "    print(json.dumps({'ok': True}), flush=True)\n", encoding="utf-8")
+    return script
+
+
+def test_each_language_goes_to_its_own_helper_and_one_failing_leaves_the_other(tmp_path):
+    from tomo.config import Config
+
+    gender = ["male"]
+    s = speech.Speech(Config.for_tests(tmp_path), python=sys.executable, gender=lambda: gender[0])
+    s.piper.script, s.piper.args = fake_helper(tmp_path, "piper.py"), []
+    s.bgtts.script, s.bgtts.args = fake_helper(tmp_path, "bgtts.py"), []
+
+    async def run():
+        said = [(await s.synthesize("Готово, звукът е на 40%.")).read_text(encoding="utf-8"),
+                (await s.synthesize("Done.")).read_text(encoding="utf-8")]
+        gender[0] = "female"
+        said.append((await s.synthesize("Готово.")).read_text(encoding="utf-8"))
+        with pytest.raises(RuntimeError, match="boom"):
+            await s.synthesize("Това е boom, нали.")
+        said.append((await s.synthesize("Още съм тук.")).read_text(encoding="utf-8"))  # the same helper, still there
+        s.bgtts._stop()
+        s.bgtts.script = tmp_path / "no-such-helper.py"
+        with pytest.raises(RuntimeError):
+            await s.synthesize("Готово.")
+        said.append((await s.synthesize("Still here.")).read_text(encoding="utf-8"))
+        piper = s.piper._process
+        s.piper._stop()
+        await piper.wait()
+        await asyncio.sleep(0)  # the pipes close on the next turn of the loop
+        return said
+
+    assert asyncio.run(run()) == [
+        "bgtts.py|bgtts-male|Готово, звукът е на четиридесет процента.",
+        "piper.py|en_GB-alan-medium|Done.",
+        "bgtts.py|bgtts-female|Готово.",
+        "bgtts.py|bgtts-female|Още съм тук.",
+        "piper.py|en_GB-cori-medium|Still here.",
+    ]
+
+
+@pytest.mark.parametrize("digits, words", [
+    ("0", "нула"), ("7", "седем"), ("10", "десет"), ("11", "единадесет"), ("20", "двадесет"),
+    ("21", "двадесет и едно"), ("100", "сто"), ("105", "сто и пет"), ("120", "сто и двадесет"),
+    ("121", "сто двадесет и едно"), ("1000", "хиляда"), ("1005", "хиляда и пет"), ("1200", "хиляда и двеста"),
+    ("1250", "хиляда двеста и петдесет"), ("2026", "две хиляди двадесет и шест"),
+    ("21000", "двадесет и една хиляди"), ("1000000", "един милион"), ("2000000", "два милиона"),
+])
+def test_a_number_in_bulgarian_words(digits, words):
+    assert speech.numbers_in_bulgarian(digits) == words
+
+
+@pytest.mark.parametrize("text, heard", [
+    ("Звукът е на 40%.", "Звукът е на четиридесет процента."),
+    ("Само 1% остана.", "Само един процент остана."),
+    ("Само 21% остана.", "Само двадесет и един процента остана."),
+    ("Седиш от 2 часа, 1 час без почивка.", "Седиш от два часа, един час без почивка."),
+    ("Остават 2 минути и 1 минута.", "Остават две минути и една минута."),
+    ("Вече 21 минути и 21 файла.", "Вече двадесет и една минути и двадесет и един файла."),
+    ("Отворих 2 приложения и 1 приложение.", "Отворих две приложения и едно приложение."),
+    ("Сега е 15:30.", "Сега е петнадесет и тридесет."),
+    ("Сега е 9:05.", "Сега е девет и нула пет."),
+    ("Среща в 9:00, не в 1:00.", "Среща в девет часа, не в един час."),
+    ("Температурата е 3,5 градуса.", "Температурата е три цяло и пет градуса."),
+    ("Кодът е 007.", "Кодът е нула нула седем."),
+    ("На 1.5.2026 и файлът v2.", "На едно. пет. две хиляди двадесет и шест и файлът v две."),
+    ("Без цифри тук.", "Без цифри тук."),
+])
+def test_digits_become_words_before_the_bulgarian_voice_reads_them(text, heard):
+    assert speech.numbers_in_bulgarian(text) == heard
 
 
 # ---- screenshots -------------------------------------------------------------------------

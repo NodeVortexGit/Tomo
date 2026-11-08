@@ -109,8 +109,23 @@ class OpenChat:
 
 
 @dataclass(frozen=True)
+class RenameChat:
+    """Give a chat in the history a title of the user's own."""
+
+    id: str
+    title: str
+
+
+@dataclass(frozen=True)
+class DeleteChat:
+    """Delete a chat for good (what Tomo has remembered about the user stays)."""
+
+    id: str
+
+
+@dataclass(frozen=True)
 class SetHidden:
-    """Hide her in the corner of the screen, or bring her out."""
+    """Hide her at the side of the screen, or bring her out."""
 
     on: bool
 
@@ -168,14 +183,16 @@ class Carry:
 
 @dataclass(frozen=True)
 class Hide:
-    """Hide in the corner (or come out): she peeks over the screen's edge
-    until the chat or a task brings her out."""
+    """Hide at the side (or come out): she lies at the screen's right edge,
+    her head poking out, until the chat or a task brings her out."""
 
     on: bool
 
 
 @dataclass(frozen=True)
 class ControlMode:
+    """She's using the mouse: her window lets every click through."""
+
     on: bool
 
 

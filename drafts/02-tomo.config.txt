@@ -22,7 +22,8 @@ python-dotenv зарежда .env, без да презаписва вече з�
                        llm_keep_alive ("1h"),
                        tts_voice_male ("en_GB-alan-medium"),
                        tts_voice_female ("en_GB-cori-medium"),
-                       tts_voice_bg ("bg_BG-dimitar-medium"), tts_speed,
+                       tts_voice_bg_male ("bgtts-male"),
+                       tts_voice_bg_female ("bgtts-female"), tts_speed,
                        persona_name, character_path,
                        data_dir, audit_log_path, scripts_dir, assets_dir,
                        allow_command_execution, extra_allowed_commands,
@@ -54,5 +55,5 @@ python-dotenv зарежда .env, без да презаписва вече з�
   За Gemma 4 Ollama има нужда от LLAMA_ARG_CACHE_RAM=0 и
   LLAMA_ARG_CTX_CHECKPOINTS=4 (README, раздел 2.1), иначе може да „замръзне“.
 - Гласовете: TOMO_TTS_VOICE_MALE, TOMO_TTS_VOICE_FEMALE (английски, според
-  персонажа) и TOMO_TTS_VOICE_BG (български, за всички). Старата настройка
-  TOMO_TTS_VOICE вече не се чете.
+  персонажа) и TOMO_TTS_VOICE_BG_MALE, TOMO_TTS_VOICE_BG_FEMALE (български, според
+  персонажа). Старите настройки TOMO_TTS_VOICE и TOMO_TTS_VOICE_BG вече не се четат.

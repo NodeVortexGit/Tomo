@@ -31,6 +31,12 @@ from . import platform
 log = logging.getLogger(__name__)
 
 HTCLOSE = 20
+# A window's buttons, as WM_NCHITTEST names them, and how a window is shown
+# maximized, minimized or restored where its button can't be clicked.
+BUTTONS = {"close": 20, "maximize": 9, "minimize": 8}
+SHOW = {"maximize": 3, "minimize": 6, "restore": 9}  # ShowWindow's SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE
+# Whose window has the keyboard while the volume panel by the clock is open.
+PANEL_PROGRAMS = {"shellhost", "shellexperiencehost", "controlcenter"}
 # Not app windows, though they're visible and titled: the desktop and the taskbar.
 SHELL_CLASSES = {"Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"}
 HOST = "applicationframehost"  # a Store app's window frame
@@ -122,27 +128,88 @@ def open_windows() -> list[AppWindow]:
 
 
 def close_button(window: AppWindow) -> tuple[int, int] | None:
-    """Where the window's close button is, in screen pixels, as the window
-    itself says — the middle of the spots near its top-right corner where
-    it answers HTCLOSE. None if it doesn't say."""
+    """Where the window's close button is (see :func:`button`)."""
+    return button(window, "close")
+
+
+def button(window: AppWindow, which: str) -> tuple[int, int] | None:
+    """Where one of the window's buttons — "close", "maximize" (which also
+    restores) or "minimize" — is, in screen pixels, as the window itself
+    says: the middle of the spots near its top-right corner where it
+    answers that button to WM_NCHITTEST. None if it doesn't say."""
     if not platform.WINDOWS:
         return None
+    wanted = BUTTONS[which]
     left, top, right, bottom = frame(window)
     spots = [(x, y) for x in range(right - 2, max(left, right - 200), -4) for y in range(top + 2, min(bottom, top + 64), 4)
-             if _hit_test(window.handle, x, y) == HTCLOSE]
+             if _hit_test(window.handle, x, y) == wanted]
     if not spots:
         return None
     return sum(x for x, _ in spots) // len(spots), sum(y for _, y in spots) // len(spots)
 
 
-def corner(window: AppWindow) -> tuple[int, int]:
-    """Where a close button usually is: by the window's top-right corner."""
+def corner(window: AppWindow, which: str = "close") -> tuple[int, int]:
+    """Where a button usually is: the close button by the window's top-right
+    corner, the others one and two buttons to its left."""
     left, top, right, bottom = frame(window)
     scale = 1.0
     if platform.WINDOWS:
         _, _, user32 = _user32()
         scale = (user32.GetDpiForWindow(window.handle) or 96) / 96
-    return int(right - 23 * scale), int(top + 15 * scale)
+    step = {"close": 0, "maximize": 1, "minimize": 2}.get(which, 0)
+    return int(right - (23 + 46 * step) * scale), int(top + 15 * scale)
+
+
+def ask(window: AppWindow, action: str) -> None:
+    """Have the window close (asked, as its close button asks), or maximize,
+    minimize or restore (shown so — some apps that draw their own frame,
+    like Discord, ignore being asked)."""
+    if action == "close":
+        ask_to_close(window)
+    elif platform.WINDOWS:
+        _, _, user32 = _user32()
+        user32.ShowWindowAsync(window.handle, SHOW[action])
+    elif shutil.which("wmctrl"):
+        change = {"maximize": "add,maximized_vert,maximized_horz", "restore": "remove,maximized_vert,maximized_horz"}
+        if action in change:
+            subprocess.run(["wmctrl", "-ir", hex(window.handle), "-b", change[action]], capture_output=True, timeout=5)
+
+
+def state(window: AppWindow) -> str:
+    """"minimized", "maximized" or "normal"."""
+    if not platform.WINDOWS:
+        return "normal"
+    _, _, user32 = _user32()
+    if user32.IsIconic(window.handle):
+        return "minimized"
+    return "maximized" if user32.IsZoomed(window.handle) else "normal"
+
+
+def volume_button() -> tuple[int, int] | None:
+    """The middle of the speaker icon by the clock, in screen pixels (None:
+    not found). UI Automation, through PowerShell: it's drawn inside the
+    taskbar."""
+    if not platform.WINDOWS:
+        return None
+    _, wintypes, user32 = _user32()
+    user32.FindWindowW.restype = wintypes.HWND
+    tray = user32.FindWindowW("Shell_TrayWnd", None)
+    if not tray:
+        return None
+    script = (
+        "Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes; "
+        f"$tray = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]{int(tray)}); "
+        "$id = New-Object System.Windows.Automation.PropertyCondition("
+        "[System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'SystemTrayIcon'); "
+        "foreach ($b in $tray.FindAll([System.Windows.Automation.TreeScope]::Descendants, $id)) { "
+        "if ($b.Current.Name -match '^(Volume|Speakers|Headphones|Звук|Сила на звука|Високоговорители|Слушалки)') { "
+        "$r = $b.Current.BoundingRectangle; '{0} {1} {2} {3}' -f $r.X, $r.Y, $r.Width, $r.Height; break } }")
+    return _ui_automation_point(script)
+
+
+def panel_open() -> bool:
+    """Whether the panel the speaker icon opens has the keyboard."""
+    return foreground_program() in PANEL_PROGRAMS
 
 
 def frame(window: AppWindow) -> tuple[int, int, int, int]:
@@ -243,12 +310,18 @@ def start_button() -> tuple[int, int] | None:
         "[System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'StartButton'); "
         "$b = $tray.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $id); "
         "if ($b) { $r = $b.Current.BoundingRectangle; '{0} {1} {2} {3}' -f $r.X, $r.Y, $r.Width, $r.Height }")
+    return _ui_automation_point(script)
+
+
+def _ui_automation_point(script: str) -> tuple[int, int] | None:
+    """The middle of the box a PowerShell UI Automation script prints
+    ("x y width height"); None if it prints none."""
     try:
         out = subprocess.run(platform.shell_argv(script), capture_output=True, timeout=10,
                              creationflags=platform.quiet_flags()).stdout.decode("utf-8", "replace")
         x, y, w, h = (float(v) for v in out.split()[:4])
     except (OSError, subprocess.TimeoutExpired, ValueError) as e:
-        log.info("couldn't find the Start button: %s", e)
+        log.info("couldn't find it on the taskbar: %s", e)
         return None
     return int(x + w / 2), int(y + h / 2)
 

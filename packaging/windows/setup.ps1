@@ -22,7 +22,7 @@ try {
         & $uv venv --python 3.12 $venv
         if ($LASTEXITCODE -ne 0) { throw "couldn't create the Python environment" }
     }
-    & $uv pip install --python $python -r (Join-Path $app "pyproject.toml") --extra all
+    & $uv pip install --python $python --no-sources --torch-backend cpu -r (Join-Path $app "pyproject.toml") --extra all
     if ($LASTEXITCODE -ne 0) { throw "couldn't install Tomo's Python packages" }
     if ($Models) {
         & $python (Join-Path $app "scripts\setup_models.py")

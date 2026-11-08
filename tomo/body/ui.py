@@ -4,8 +4,8 @@ moderngl into the same window as the character.
 :class:`Ui` owns the ImGui context: the fonts (Roboto, which has Cyrillic,
 plus Font Awesome's icons), the colours, the input the window forwards
 (pointer, buttons, wheel, keys, typed characters) and the drawing of each
-frame's interface. The chat window (:mod:`.chat`), the lock screen
-(:mod:`.workout`) and the control badge (:mod:`.control`) are drawn with it.
+frame's interface. The chat window (:mod:`.chat`) and the lock screen
+(:mod:`.workout`) are drawn with it.
 
 Everything is laid out in logical pixels; ``scale`` (the display's scaling,
 e.g. 1.5 at 150 %) is applied when drawing, and the fonts are rasterized at
@@ -49,6 +49,8 @@ ICON_CHECK = ""
 ICON_NEW_CHAT = ""
 ICON_HISTORY = ""
 ICON_HIDE = ""
+ICON_RENAME = "\uf303"
+ICON_DELETE = "\uf2ed"
 ICON_SHOW = ""
 
 VERTEX = """#version 330 core

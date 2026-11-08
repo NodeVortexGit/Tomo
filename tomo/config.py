@@ -20,7 +20,8 @@ DEFAULT_PERSONA = "Tomo"
 DEFAULT_VOICE_MALE = "en_GB-alan-medium"
 DEFAULT_VOICE_FEMALE = "en_GB-cori-medium"
 # Piper's only Bulgarian voice so far, for every character.
-DEFAULT_VOICE_BG = "bg_BG-dimitar-medium"
+DEFAULT_VOICE_BG_MALE = "bgtts-male"
+DEFAULT_VOICE_BG_FEMALE = "bgtts-female"
 # Enough for the persona, the tools and a recent stretch of conversation.
 DEFAULT_CONTEXT = 8192
 # How long Ollama keeps the model loaded between replies.
@@ -61,7 +62,8 @@ class Config:
     # ---- speech (all on this machine) ------------------------------------------
     tts_voice_male: str = DEFAULT_VOICE_MALE
     tts_voice_female: str = DEFAULT_VOICE_FEMALE
-    tts_voice_bg: str = DEFAULT_VOICE_BG
+    tts_voice_bg_male: str = DEFAULT_VOICE_BG_MALE
+    tts_voice_bg_female: str = DEFAULT_VOICE_BG_FEMALE
     tts_speed: float = 1.0
     # ---- character / persona -------------------------------------------------
     persona_name: str = DEFAULT_PERSONA
@@ -131,7 +133,8 @@ class Config:
             llm_keep_alive=env_str("TOMO_LLM_KEEP_ALIVE") or DEFAULT_KEEP_ALIVE,
             tts_voice_male=env_str("TOMO_TTS_VOICE_MALE") or DEFAULT_VOICE_MALE,
             tts_voice_female=env_str("TOMO_TTS_VOICE_FEMALE") or DEFAULT_VOICE_FEMALE,
-            tts_voice_bg=env_str("TOMO_TTS_VOICE_BG") or DEFAULT_VOICE_BG,
+            tts_voice_bg_male=env_str("TOMO_TTS_VOICE_BG_MALE") or DEFAULT_VOICE_BG_MALE,
+            tts_voice_bg_female=env_str("TOMO_TTS_VOICE_BG_FEMALE") or DEFAULT_VOICE_BG_FEMALE,
             tts_speed=speed if 0.1 < speed < 5.0 else 1.0,
             persona_name=env_str("TOMO_PERSONA") or DEFAULT_PERSONA,
             character_path=character or data_dir / "characters" / "default.vrm",
@@ -171,7 +174,7 @@ class Config:
         auto = lambda s: s or "auto"  # noqa: E731
         return (
             f"Config {{ llm: {self.llm_provider.value} (url: {auto(self.llm_url)}, model: {auto(self.llm_model)}), "
-            f"voices: {self.tts_voice_male} / {self.tts_voice_female} / {self.tts_voice_bg}, "
+            f"voices: {self.tts_voice_male} / {self.tts_voice_female} / {self.tts_voice_bg_male} / {self.tts_voice_bg_female}, "
             f"persona: {self.persona_name}, "
             f"wake_word: {self.wake_word}, data_dir: {self.data_dir} }}"
         )

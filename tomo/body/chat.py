@@ -17,9 +17,12 @@ the character into a rounded panel.
 
 Beside her name, the chats: a new one (the brain empties the window — what
 Tomo knows about the user carries over), and the earlier ones, the latest
-first, to read again or carry on. On the right, by the voice and quit
-buttons: hiding her in the corner (which closes the chat too) or bringing
-her out.
+first, to read again or carry on. A chat in that list lights up under the
+pointer, with three dots on its right: a menu to rename it (in place: Enter
+keeps it, Escape doesn't) or to delete it (after asking). On the right, by
+the voice and quit
+buttons: hiding her at the side of the screen (which closes the chat too)
+or bringing her out.
 
 Pictures can go with a message: the 📎 button (the desktop's file dialog),
 dropping image files on the chat or on her (which opens the chat), or
@@ -56,12 +59,12 @@ from typing import Callable, NamedTuple
 from imgui_bundle import imgui
 
 from .. import attachments, events, platform
-from ..events import (CharacterChoice, ChatInfo, ChatLine, ImportCharacter, NewChat, OpenChat, Role, SetHidden, SetVoice,
-                      Shutdown, StartVoiceInput, UserMessage)
+from ..events import (CharacterChoice, ChatInfo, ChatLine, DeleteChat, ImportCharacter, NewChat, OpenChat, RenameChat,
+                      Role, SetHidden, SetVoice, Shutdown, StartVoiceInput, UserMessage)
 from .movement import Locomotion, body_size
-from .ui import (ICON_CHECK, ICON_CLOSE, ICON_COPY, ICON_HIDE, ICON_HISTORY, ICON_IMAGE, ICON_MIC, ICON_MUTED,
-                 ICON_NEW_CHAT, ICON_PAPERCLIP, ICON_POWER, ICON_SEND, ICON_SHOW, ICON_USER, ICON_VOLUME, flags, rgba,
-                 vec4)
+from .ui import (ICON_CHECK, ICON_CLOSE, ICON_COPY, ICON_DELETE, ICON_HIDE, ICON_HISTORY, ICON_IMAGE, ICON_MIC,
+                 ICON_MUTED, ICON_NEW_CHAT, ICON_PAPERCLIP, ICON_POWER, ICON_RENAME, ICON_SEND, ICON_SHOW, ICON_USER,
+                 ICON_VOLUME, flags, rgba, vec4)
 
 log = logging.getLogger(__name__)
 
@@ -81,7 +84,11 @@ COPY_BOX = 16.0  # px: the copy button by a message's name
 COPIED_SECS = 1.5  # the "copied" tick or note
 SCROLL_SPEED = 10.0  # selecting past the transcript's edge: px a second per px beyond it
 CHATS_W = PANEL_W - 44.0  # px: the list of earlier chats…
-CHATS_SHOWN = 10  # …and how many rows of it show at once
+CHATS_SHOWN = 10  # …how many rows of it show at once…
+CHAT_ROW = 24.0  # …how tall each is…
+DOTS_W = 24.0  # …and how wide the three dots on one are
+DELETE_NOTE_W = 210.0  # px: the words asking whether to delete a chat
+DANGER = (255, 130, 120)
 MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
 
 
@@ -359,7 +366,14 @@ class ChatState:
     transcript: list[ChatLine] = field(default_factory=list)
     chats: list[ChatInfo] = field(default_factory=list)  # the history, the latest first
     current_chat: str = ""  # the one showing
-    hidden: bool = False  # she's set to hide in the corner
+    history_open: bool = False  # the list of chats is out
+    menu_chat: str = ""  # the chat its three dots were last clicked on
+    menu_at: tuple[float, float] = (0.0, 0.0)  # where: the menu's top right corner
+    confirming: bool = False  # that menu is asking whether to delete it
+    renaming: str = ""  # the chat being renamed…
+    new_title: str = ""  # …what's typed for it…
+    focus_title: bool = False  # …and that the box takes the keyboard next
+    hidden: bool = False  # she's set to hide at the side of the screen
     input: str = ""
     thinking: bool = False
     listening: bool = False  # "Hey Tomo" was heard; the spoken request is being taken
@@ -486,9 +500,11 @@ class ChatState:
 
     def dismiss(self, escape: bool, clicked_at: tuple[float, float] | None, character_rect, width: float,
                 height: float) -> None:
-        """Close on Escape, or on a click away from both the chat and her."""
+        """Close on Escape, or on a click away from both the chat and her.
+        (With the list of chats out, Escape is for that.)"""
         if self.phase != Phase.OPEN:
             return
+        escape = escape and not self.history_open
         away = clicked_at is not None and not inside(character_rect, *clicked_at) and not inside(
             panel_rect(width, height), *clicked_at)
         if escape or away:
@@ -567,9 +583,12 @@ class ChatState:
             imgui.open_popup("chats")
         # Under the header, inside the panel.
         imgui.set_next_window_pos(imgui.ImVec2(x0 + 8.0, imgui.get_item_rect_max().y + 6.0), imgui.Cond_.appearing.value)
-        if imgui.begin_popup("chats"):
+        self.history_open = imgui.begin_popup("chats")
+        if self.history_open:
             self.chat_menu(send)
             imgui.end_popup()
+        else:
+            self.renaming = ""
         buttons = 5
         imgui.same_line(imgui.get_window_width() - 14.0 - buttons * size - (buttons - 1) * spacing)
         if icon_button(ICON_USER, "Change character", size):
@@ -579,7 +598,7 @@ class ChatState:
             imgui.end_popup()
         imgui.same_line()
         if icon_button(ICON_SHOW if self.hidden else ICON_HIDE,
-                       "Come out of the corner" if self.hidden else "Hide in the corner", size, key="hide"):
+                       "Come out" if self.hidden else "Hide at the side of the screen", size, key="hide"):
             send(SetHidden(not self.hidden))
             if not self.hidden:
                 close = True  # out of the way: the chat too
@@ -704,8 +723,7 @@ class ChatState:
         """Start a new chat (the brain empties the window). During a reply,
         once it's in."""
         send(NewChat())
-        if self.thinking:
-            self.notice, self.notice_until = "A new chat starts once Tomo has answered", time.monotonic() + NOTICE_SECS
+        self.note_after_reply("A new chat starts once Tomo has answered")
         self.focus_input = True
 
     def chat_menu(self, send: Callable) -> None:
@@ -718,22 +736,122 @@ class ChatState:
         if not self.chats:
             imgui.text_colored(vec4(150, 150, 150), "No chats yet")
             return
-        row = imgui.get_text_line_height() + imgui.get_style().item_spacing.y
+        row = CHAT_ROW + imgui.get_style().item_spacing.y
         imgui.begin_child("chat-list", imgui.ImVec2(CHATS_W, row * min(len(self.chats), CHATS_SHOWN)))
+        # A row draws its own light: on its dots, the pointer isn't on the selectable.
+        imgui.push_style_color(imgui.Col_.header_hovered.value, vec4(0, 0, 0, 0))
+        imgui.push_style_var(imgui.StyleVar_.selectable_text_align.value, imgui.ImVec2(0.0, 0.5))
         now = time.time()
         for info in self.chats:
-            when = when_said(info.updated_at, now)
-            when_w = imgui.calc_text_size(when).x
-            width = imgui.get_content_region_avail().x
-            title = fit(info.title or "(pictures)", width - when_w - 16.0)
-            clicked, _ = imgui.selectable(f"{title}##{info.id}", info.id == self.current_chat)
-            if clicked:
-                if info.id != self.current_chat:
-                    send(OpenChat(info.id))
-                imgui.close_current_popup()  # inside the list, a pick doesn't close it by itself
-            lo = imgui.get_item_rect_min()
-            imgui.get_window_draw_list().add_text(imgui.ImVec2(lo.x + width - when_w, lo.y), rgba(150, 150, 150), when)
+            if info.id == self.renaming:
+                self.rename_row(info, send)
+            else:
+                self.chat_row(info, now, send)
+        imgui.pop_style_var()
+        imgui.pop_style_color()
+        # Hanging left from the dots, so it stays inside the panel: a click
+        # outside the panel closes the chat.
+        imgui.set_next_window_pos(imgui.ImVec2(*self.menu_at), imgui.Cond_.always.value, imgui.ImVec2(1.0, 0.0))
+        if imgui.begin_popup("chat-actions"):
+            self.chat_actions(send)
+            imgui.end_popup()
         imgui.end_child()
+
+    def chat_row(self, info: ChatInfo, now: float, send: Callable) -> None:
+        """A chat in the list: its title and when it was last used; under the
+        pointer, or with its menu out, it lights up with three dots instead."""
+        x = imgui.get_cursor_pos_x()
+        width = imgui.get_content_region_avail().x
+        lo = imgui.get_cursor_screen_pos()
+        hi = imgui.ImVec2(lo.x + width, lo.y + CHAT_ROW)
+        # Also while pressed: the dots must still be there when the button comes up.
+        hovered = imgui.is_window_hovered(flags(imgui.HoveredFlags_.allow_when_blocked_by_active_item))
+        lit = ((self.menu_chat == info.id and imgui.is_popup_open("chat-actions"))
+               or (hovered and imgui.is_mouse_hovering_rect(lo, hi)))
+        draw = imgui.get_window_draw_list()
+        if lit:
+            draw.add_rect_filled(lo, hi, rgba(255, 255, 255, 30), 4.0)
+        when = when_said(info.updated_at, now)
+        when_w = imgui.calc_text_size(when).x
+        title = fit(info.title or "(pictures)", width - max(when_w, DOTS_W) - 16.0)
+        clicked, _ = imgui.selectable(f"{title}##{info.id}", info.id == self.current_chat,
+                                      flags(imgui.SelectableFlags_.allow_overlap), imgui.ImVec2(0.0, CHAT_ROW))
+        if clicked:
+            if info.id != self.current_chat:
+                send(OpenChat(info.id))
+            imgui.close_current_popup()  # inside the list, a pick doesn't close it by itself
+        if not lit:
+            y = lo.y + (CHAT_ROW - imgui.get_text_line_height()) * 0.5
+            draw.add_text(imgui.ImVec2(hi.x - when_w, y), rgba(150, 150, 150), when)
+            return
+        imgui.same_line(x + width - DOTS_W, 0.0)
+        if imgui.invisible_button(f"##dots-{info.id}", imgui.ImVec2(DOTS_W, CHAT_ROW)):
+            self.menu_chat, self.menu_at, self.confirming = info.id, (hi.x, hi.y), False
+            imgui.open_popup("chat-actions")
+        if imgui.is_item_hovered():
+            draw.add_rect_filled(imgui.get_item_rect_min(), hi, rgba(255, 255, 255, 40), 4.0)
+            imgui.set_tooltip("Rename or delete")
+        centre = imgui.ImVec2(hi.x - DOTS_W * 0.5, lo.y + CHAT_ROW * 0.5)
+        for step in (-5.0, 0.0, 5.0):
+            draw.add_circle_filled(imgui.ImVec2(centre.x + step, centre.y), 1.8, imgui.get_color_u32(imgui.Col_.text.value))
+
+    def chat_actions(self, send: Callable) -> None:
+        """What the three dots offer: rename, or delete, which asks first."""
+        if self.confirming:
+            imgui.push_text_wrap_pos(imgui.get_cursor_pos_x() + DELETE_NOTE_W)
+            imgui.text_unformatted("Delete this chat?")
+            imgui.text_colored(vec4(150, 150, 150), "Its messages and pictures go for good. "
+                                                    "What Tomo remembers about you stays.")
+            imgui.pop_text_wrap_pos()
+            imgui.push_style_color(imgui.Col_.text.value, vec4(*DANGER))
+            delete = imgui.button("Delete")
+            imgui.pop_style_color()
+            if delete:
+                send(DeleteChat(self.menu_chat))
+                self.note_after_reply("The chat goes once Tomo has answered")
+                imgui.close_current_popup()
+            imgui.same_line()
+            if imgui.button("Cancel"):
+                imgui.close_current_popup()
+            return
+        clicked, _ = imgui.selectable(f"{ICON_RENAME}  Rename", False)
+        if clicked:
+            info = next((c for c in self.chats if c.id == self.menu_chat), None)
+            if info is not None:
+                self.renaming, self.new_title, self.focus_title = info.id, info.title, True
+        imgui.push_style_color(imgui.Col_.text.value, vec4(*DANGER))
+        clicked, _ = imgui.selectable(f"{ICON_DELETE}  Delete", False, flags(imgui.SelectableFlags_.no_auto_close_popups))
+        imgui.pop_style_color()
+        if clicked:
+            self.confirming = True
+
+    def rename_row(self, info: ChatInfo, send: Callable) -> None:
+        """A chat being renamed: a text box in its row. Enter, or clicking
+        elsewhere in the list, keeps what's typed; Escape doesn't."""
+        pad = (CHAT_ROW - imgui.get_text_line_height()) * 0.5
+        imgui.push_style_var(imgui.StyleVar_.frame_padding.value, imgui.ImVec2(imgui.get_style().frame_padding.x, pad))
+        imgui.set_next_item_width(imgui.get_content_region_avail().x)
+        if self.focus_title:
+            imgui.set_keyboard_focus_here()
+            self.focus_title = False
+        entered, self.new_title = imgui.input_text(f"##rename-{info.id}", self.new_title,
+                                                   flags(imgui.InputTextFlags_.enter_returns_true,
+                                                         imgui.InputTextFlags_.auto_select_all))
+        left = imgui.is_item_deactivated()
+        imgui.pop_style_var()
+        if imgui.is_key_pressed(imgui.Key.escape, False):
+            self.renaming = ""
+        elif entered or left:
+            self.renaming = ""
+            title = self.new_title.strip()
+            if title and title != info.title:
+                send(RenameChat(info.id, title))
+                self.note_after_reply("The new name comes once Tomo has answered")
+
+    def note_after_reply(self, words: str) -> None:
+        """The brain does one thing at a time: during a reply, this has to wait."""
+        if self.thinking:
+            self.notice, self.notice_until = words, time.monotonic() + NOTICE_SECS
 
     # ---- the conversation ----------------------------------------------------------------------
 

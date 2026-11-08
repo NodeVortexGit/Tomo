@@ -22,8 +22,9 @@
     чиято програма се казва като приложението, или — на приложение от Store
     — чието заглавие съдържа името му (не раздел в браузъра с такова
     заглавие).
-  close_button(window): самият прозорец казва къде е бутонът му за
-    затваряне — отговаря HTCLOSE на WM_NCHITTEST (същия въпрос задава
+  button(window, which) / close_button(window): самият прозорец казва къде
+    е бутонът му — за затваряне, уголемяване (и възстановяване) или
+    смаляване: отговаря HTCLOSE / HTMAXBUTTON / HTMINBUTTON на WM_NCHITTEST (същия въпрос задава
     Windows, докато мишката се движи над него). Проверяват се точки близо до
     горния десен ъгъл; връща средата им. Работи и за браузърите на
     Chromium, и за приложенията на Electron. None — ако прозорецът не казва (на цял екран и др.).
@@ -31,8 +32,12 @@
     отива курсорът, когато прозорецът не казва.
   shows_at(window, x, y): дали на това място на екрана наистина е той (не е
     закрит). bring_forward(): от лентата на задачите и пред останалите.
-  ask_to_close(window): молба за затваряне, каквато праща и бутонът
-    (WM_SYSCOMMAND, SC_CLOSE). is_open(), dialog_of() — прозорец, който той е
+  ask_to_close(window), ask(window, action): затваряне — молба, каквато праща
+    и бутонът (WM_SYSCOMMAND, SC_CLOSE); уголемяване, смаляване и
+    възстановяване — ShowWindow (Discord например пренебрегва молбата).
+    state(window): minimized / maximized / normal. volume_button(): иконата
+    на високоговорителя до часовника (UI Automation); panel_open(): дали
+    панелът ѝ е отворен (ShellHost в Windows 11 24H2). is_open(), dialog_of() — прозорец, който той е
     отворил пред себе си (напр. „Save changes?“).
   start_button(): в Windows 10 — отделен прозорец „Start“ в лентата на
     задачите; в Windows 11 — UI Automation през PowerShell (AutomationId

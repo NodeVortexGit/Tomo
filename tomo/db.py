@@ -108,6 +108,7 @@ class Store:
             path.mkdir(parents=True, exist_ok=True)
             self._client = chromadb.PersistentClient(path=str(path), settings=settings)
         self._lock = threading.RLock()
+        self._seq: int | None = None  # the next line's number, once it's been worked out
 
         def collection(name: str, **meta: str):
             return self._client.get_or_create_collection(
@@ -212,7 +213,7 @@ class Store:
             # Metadata holds only plain values: the images go in as JSON.
             meta["attachments"] = json.dumps([asdict(a) for a in line.attachments], ensure_ascii=False)
         with self._lock:
-            meta["seq"] = seq = self.messages.count()
+            meta["seq"] = seq = self._next_seq()
             self.messages.add(ids=[f"msg-{seq:09d}"], documents=[line.text], embeddings=[PLACEHOLDER],
                               metadatas=[meta])
             if chat:
@@ -224,6 +225,15 @@ class Store:
                 self.chats.upsert(ids=[chat], documents=[title], embeddings=[PLACEHOLDER], metadatas=[
                     {**old, "updated_at": line.at_ms, "count": int(old.get("count", 0)) + 1}])
 
+    def _next_seq(self) -> int:
+        """The next line's number: past every line there is. (Not how many
+        there are: with a chat deleted, that would be a line's number already.)"""
+        if self._seq is None:
+            metas = self.messages.get(include=["metadatas"])["metadatas"]
+            self._seq = max((int(m["seq"]) for m in metas), default=-1) + 1
+        self._seq += 1
+        return self._seq - 1
+
     def recent_messages(self, limit: int, chat: str | None = None) -> list[ChatLine]:
         """The ``limit`` most recent lines of ``chat`` (None: of all of
         them), oldest first."""
@@ -232,12 +242,9 @@ class Store:
         if chat is not None:
             return self.chat_lines(chat)[0][-limit:]
         with self._lock:
-            total = self.messages.count()
-            if total == 0:
-                return []
-            got = self.messages.get(where={"seq": {"$gte": max(0, total - limit)}})
+            got = self.messages.get()
         rows = sorted(zip(got["metadatas"], got["documents"]), key=lambda r: r[0]["seq"])
-        return [_line(m, d) for m, d in rows]
+        return [_line(m, d) for m, d in rows[-limit:]]
 
     def chat_lines(self, chat: str, after: int = -1) -> tuple[list[ChatLine], int]:
         """A chat's lines, in order — those after line number ``after`` — and
@@ -255,6 +262,24 @@ class Store:
         chats = [ChatInfo(i, d or "", int(m.get("started_at", 0)), int(m.get("updated_at", 0)), int(m.get("count", 0)))
                  for i, d, m in zip(got["ids"], got["documents"], got["metadatas"])]
         return sorted(chats, key=lambda c: (-c.updated_at, c.id))
+
+    def rename_chat(self, chat: str, title: str) -> None:
+        """Give a chat a title of the user's own (no words: it keeps the one
+        it has). It stays where it is in the history."""
+        title = one_line(title)
+        if title:
+            with self._lock:
+                if self.chats.get(ids=[chat])["ids"]:
+                    self.chats.update(ids=[chat], documents=[title], embeddings=[PLACEHOLDER])
+
+    def delete_chat(self, chat: str) -> list[Attachment]:
+        """Delete a chat and its lines; what the memory has kept from it stays.
+        Returns the pictures that were in it, for their copies to go too."""
+        with self._lock:
+            metas = self.messages.get(where={"chat": chat}, include=["metadatas"])["metadatas"]
+            self.messages.delete(where={"chat": chat})
+            self.chats.delete(ids=[chat])
+        return [picture for meta in metas for picture in _attachments(meta.get("attachments"))]
 
     def remembered(self, chat: str) -> int:
         """How far the memory has read a chat: its last line number read (-1: none)."""
@@ -443,9 +468,12 @@ def _line(meta: dict, text: str | None) -> ChatLine:
 
 def chat_title(line: ChatLine) -> str:
     """A chat's title: the first thing the user said, on one line."""
-    text = " ".join(line.text.split())
-    if not text:
-        return "A picture" if line.attachments else ""
+    return one_line(line.text) or ("A picture" if line.attachments else "")
+
+
+def one_line(text: str) -> str:
+    """Words as a chat's title: on one line, cut short if there are too many."""
+    text = " ".join(text.split())
     return text if len(text) <= TITLE_CHARS else text[:TITLE_CHARS - 1].rstrip() + "…"
 
 

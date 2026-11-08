@@ -17,7 +17,7 @@ from tomo.body.chat import (DOCK_GAP, LINE_END_W, ChatState, Phase, Placed, Sele
                             word_at, wrap)
 from tomo.body.control import HANDS_UP, Control
 from tomo.body.mathx import IDENTITY, Vec2, qmul, qrot, rz
-from tomo.body.movement import Locomotion, Stance, body_size
+from tomo.body.movement import Locomotion, Stance, body_size, rotate
 from tomo.body.skeleton import Skeleton
 from tomo.body.window import Desktop, DisplayServer, detect_desktop, detect_server
 from tomo.body.workout import Workout, hip_drop, mirrored
@@ -330,6 +330,15 @@ def test_another_chat_replaces_the_transcript_and_the_history_follows():
     assert chat.chats == [info] and chat.current_chat == "a"
 
 
+def test_escape_is_for_the_list_of_chats_while_it_is_out():
+    chat = ChatState(phase=Phase.OPEN, liquid_t=1.0, history_open=True)
+    chat.dismiss(True, None, None, 1920.0, 1080.0)
+    assert chat.phase == Phase.OPEN
+    chat.history_open = False
+    chat.dismiss(True, None, None, 1920.0, 1080.0)
+    assert chat.phase == Phase.CLOSING
+
+
 def test_a_chat_says_when_it_was_used_in_few_words():
     from tomo.body.chat import fit, when_said
 
@@ -550,18 +559,33 @@ def test_she_raises_both_arms_for_the_cursor():
         assert np.allclose(up[bone], rz(angle)) and not np.allclose(down[bone], rz(angle))
 
 
-def test_hidden_she_peeks_from_the_corner_and_comes_out_for_the_chat():
-    from tomo.body.app import SINK, Corner
+def test_hidden_she_lies_at_the_right_edge_and_peeks_further_under_the_pointer():
+    from tomo.body.app import PEEK_HEAD, PEEK_MORE, PEEK_Y, Corner
 
     corner, loco, arena = Corner(wanted=True), settled(300.0), Vec2(1920, 1080)
-    for _ in range(1200):
+    standing = loco.feet(320)
+    assert corner.pose(standing, 0.0, arena, 320) == (standing, 0.0), "out: where she stands"
+    for _ in range(300):  # she walks toward the edge — still upright
+        corner.update(1 / 60, loco, out=False)
+        loco.step(1 / 60, arena, body_size(320))
+    assert corner.depth == 0.0 and loco.target is not None and loco.feet(320).x > 600
+    for _ in range(600):
         busy = corner.update(1 / 60, loco, out=False)
         loco.step(1 / 60, arena, body_size(320))
-    assert corner.depth == 1.0 and corner.drop() == pytest.approx(SINK) and loco.held and not busy
-    assert abs(loco.feet(320).x - (1920 - body_size(320).x)) < 3.0, "in the bottom-right corner"
-    for _ in range(60):  # the chat opens: up she comes, and the chat has her
+    standing = loco.feet(320)
+    assert abs(standing.x - (1920 - body_size(320).x)) < 3.0, "at the right edge, and only there…"
+    feet, angle = corner.pose(standing, 0.0, arena, 320)
+    assert corner.depth == 1.0 and loco.held and not busy, "…turned into the side"
+    assert angle == pytest.approx(math.pi / 2), "turned 90°, her head toward the screen"
+    head = feet + rotate(Vec2(0.0, -320.0), angle)
+    assert head.x == pytest.approx(1920 - PEEK_HEAD * 320) and head.y == pytest.approx(1080 * PEEK_Y), "her head shows"
+    for _ in range(30):  # the pointer on her: more of her slides out
+        corner.update(1 / 60, loco, out=False, hovered=True)
+    feet, _ = corner.pose(standing, 0.0, arena, 320)
+    assert (feet + rotate(Vec2(0.0, -320.0), angle)).x == pytest.approx(1920 - PEEK_MORE * 320)
+    for _ in range(60):  # the chat opens: back she comes, and the chat has her
         corner.update(1 / 60, loco, out=True)
-    assert corner.depth == 0.0 and loco.held
+    assert corner.depth == 0.0 and corner.peek == 0.0 and loco.held
     corner.wanted = False  # "come out"
     corner.update(1 / 60, loco, out=False)
     corner.update(1 / 60, loco, out=False)

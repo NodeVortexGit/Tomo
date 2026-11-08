@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "Tomo: a local AI VRM desktop companion for Windows and Linux"
 readme = "README.md"
 license = { text = "MIT" }
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     # The brain
     "httpx>=0.27",           # the local model server (Ollama / LM Studio)
@@ -21,7 +21,12 @@ dependencies = [
 [project.optional-dependencies]
 # The helpers in scripts/ run with the same Python, so the installers add these.
 speech = [
-    "piper-tts>=1.3",                            # Tomo's voice (tts_piper.py)
+    "piper-tts>=1.3",                            # Tomo's English voice (tts_piper.py)…
+    # …and Bulgarian (tts_bgtts.py). The installers keep torch to its CPU build.
+    "torch>=2.6",
+    "torchaudio>=2.6",
+    "soundfile>=0.12",
+    "miocodec @ git+https://github.com/Aratako/MioCodec@77473544375d57e96cbdfd5d7d257e8f280fa8e3",
     "vosk>=0.3.41",                              # "Hey Tomo" (wake_word.py)…
     "onnx-asr[cpu,hub]>=0.12",                   # …and what you say, in English or Bulgarian
     "sounddevice>=0.4; sys_platform != 'linux'", # the microphone (Linux uses parecord/pw-record/arecord)

@@ -6,14 +6,14 @@ physics, the pose, the drawing.
 1. drain the brain's messages and hand each to whoever acts on it;
 2. finish loading a character, if one was being read in the background;
 3. the mouse: pick her up, throw her, click her (opens the chat),
-   right-click her (a menu: the chat, hiding in the corner);
+   right-click her (a menu: the chat, hiding at the side);
 4. her physics, idle life, the chat's animation, pictures dropped on her or
-   the chat (or pasted into it); hidden, her corner (:class:`Corner`); and
+   the chat (or pasted into it); hidden, at the side (:class:`Corner`); and
    her part when she uses the mouse herself — reaching for the cursor and
    hanging from it (control.py) — telling the brain where her hands are;
 5. place her on screen — or, during a health round, big in the middle as
    the user's mirror — then pose her bones and face and swing her hair;
-6. draw her, then the interface (chat, lock screen card, control badge),
+6. draw her, then the interface (chat, lock screen card),
    and give the pointer the shape it asks for (an I-beam over text);
 7. show the frame: at the display's rate while anything moves, 24 a second
    at rest.
@@ -55,10 +55,13 @@ HEIGHT_PX = 320.0  # her height on screen, logical px
 MIRROR_HEIGHT = 0.62  # her height while she mirrors the user, a share of the screen's
 LEG_SHARE = 0.48  # the legs' share of her height: how far she comes down with the user's hips
 GRAB_MARGIN = 4.0  # px around her box that still catch the mouse
-# Hidden in the corner, she sinks this far below the screen's edge (a share
-# of her height) — her head peeks over it — taking this long to go down…
-SINK, SINK_SECS = 0.8, 0.7
-RISE_SECS = 0.35  # …and this long to come back up
+# Hidden, she lies at the right edge of the screen, this far down it (a share
+# of its height), with this much of her showing (a share of her height): her
+# head — or more of her with the pointer on her. Once she has walked to the
+# edge she takes this long to turn into it, to come back out, and to slide
+# further out.
+PEEK_Y, PEEK_HEAD, PEEK_MORE = 0.62, 0.17, 0.45
+TUCK_SECS, RISE_SECS, PEEK_SECS = 0.45, 0.35, 0.25
 
 KEYS = {
     glfw.KEY_TAB: imgui.Key.tab, glfw.KEY_LEFT: imgui.Key.left_arrow, glfw.KEY_RIGHT: imgui.Key.right_arrow,
@@ -97,40 +100,61 @@ class Character:
 class Grab:
     pressed_at: Vec2 | None = None  # where a press on her started
     dragging: bool = False
+    can_drag: bool = True
 
 
 @dataclass
 class Corner:
-    """Hiding in the corner: she walks to the bottom-right corner and sinks
-    behind the screen's edge until only her head peeks over it, out of the
-    way. The chat, a task, or being picked up brings her out; then she goes
-    back. ``wanted`` is the user's choice, which the brain keeps."""
+    """Hiding at the side: she walks along the floor all the way to the
+    right edge of the screen, and there, at the last moment, turns into the
+    side and lies in it — turned 90°, her head toward the screen — so only
+    her head pokes out; with the pointer on her, more of her slides out. The
+    chat, a task, or a press on her brings her back out onto the floor at
+    the edge; then she goes back. ``wanted`` is the user's choice,
+    which the brain keeps."""
 
     wanted: bool = False
-    depth: float = 0.0  # 0 out … 1 sunk
-    tucked: bool = False  # in the corner right now, not out for something
+    depth: float = 0.0  # 0 out where she stands … 1 at the edge
+    peek: float = 0.0  # at the edge: 0 her head only … 1 more of her
+    tucked: bool = False  # at the edge right now, not out for something
 
-    def update(self, dt: float, loco: Locomotion, out: bool) -> bool:
-        """Toward the corner and down, or back up. True while she moves."""
+    def update(self, dt: float, loco: Locomotion, out: bool, hovered: bool = False) -> bool:
+        """Toward the edge or back, and further out under the pointer. True
+        while she moves."""
         tuck = self.wanted and not out
         if self.tucked and not tuck and not self.wanted:
             loco.held = False  # free to wander again
         self.tucked = tuck
-        at_corner = False
+        arrived = False
         if tuck:
-            loco.held = True  # no wandering out of the corner
+            loco.held = True  # no wandering off meanwhile
+            # She walks all the way to the right edge first…
             right = loco.arena.x - body_size(loco.height).x
-            at_corner = loco.stance == Stance.STANDING and abs(loco.feet(loco.height).x - right) < 3.0
-            if not at_corner and loco.target is None:
+            arrived = loco.stance == Stance.STANDING and abs(loco.feet(loco.height).x - right) < 3.0
+            if not arrived and loco.target is None:
                 loco.walk_to(1.0)
-        goal = 1.0 if at_corner and loco.is_idle() else 0.0
-        self.depth = approach(self.depth, goal, dt / (SINK_SECS if goal > self.depth else RISE_SECS))
-        return 0.0 < self.depth < 1.0 or (tuck and not at_corner)
+        # …and only there, at the last moment, turns into the side.
+        goal = 1.0 if arrived and loco.is_idle() else 0.0
+        self.depth = approach(self.depth, goal, dt / (TUCK_SECS if goal > self.depth else RISE_SECS))
+        reach = 1.0 if tuck and hovered and self.depth > 0.99 else 0.0
+        self.peek = approach(self.peek, reach, dt / PEEK_SECS)
+        return 0.0 < self.depth < 1.0 or 0.0 < self.peek < 1.0 or (tuck and not arrived)
 
-    def drop(self) -> float:
-        """How far below the floor to show her, a share of her height."""
-        d = self.depth
-        return SINK * d * d * (3.0 - 2.0 * d)
+    def pose(self, feet: Vec2, angle: float, arena: Vec2, height: float) -> tuple[Vec2, float]:
+        """Where to draw her feet, and her roll: from where she stands (``feet``,
+        ``angle``) to lying at the edge, as far along as she is."""
+        if self.depth <= 0.0:
+            return feet, angle
+        shown = PEEK_HEAD + (PEEK_MORE - PEEK_HEAD) * smooth(self.peek)
+        # Turned 90° (head to the left), her feet are a height to the right of her head.
+        edge = Vec2(arena.x - shown * height + height, arena.y * PEEK_Y)
+        k = smooth(self.depth)
+        return feet.lerp(edge, k), angle + (math.pi / 2 - angle) * k
+
+
+def smooth(t: float) -> float:
+    t = max(0.0, min(1.0, t))
+    return t * t * (3.0 - 2.0 * t)
 
 
 @dataclass
@@ -373,10 +397,12 @@ class App:
             busy |= self.chat.advance(dt, self.loco if c else None)
             busy |= self.chat.selection.dragging  # scrolling as it selects past the edge
             if c is not None:
-                # Out of her corner for the chat, a task, or in the user's hands.
+                # Out from the side for the chat, a task, or a press on her;
+                # further out while the pointer is on her.
                 out = (self.chat.phase != Phase.CLOSED or bool(self.control.carrying) or self.control.active
                        or self.grab.pressed_at is not None or not self.loco.grounded())
-                busy |= self.corner.update(dt, self.loco, out)
+                hovered = inside(c.screen_rect, Vec2(*self.window.cursor()))
+                busy |= self.corner.update(dt, self.loco, out, hovered)
                 if any(inside(c.screen_rect, p) for p in frame_input.right_presses) and not self.ui.wants_mouse():
                     self.her_menu = True
         # Her part in using the mouse: where her hands are, for the brain.
@@ -414,7 +440,6 @@ class App:
                 self.running = False
             self.draw_her_menu()
         self.workout.draw(self.ui, width)
-        self.control.draw_badge(width)
         self.ui.end()
 
         self.window.set_pointer(POINTERS.get(imgui.get_mouse_cursor()))
@@ -431,8 +456,8 @@ class App:
             self.chat.paste()
 
     def draw_her_menu(self) -> None:
-        """A right-click on her: the chat, and hiding in the corner (or
-        coming out)."""
+        """A right-click on her: the chat, and hiding at the side of the
+        screen (or coming out)."""
         if self.her_menu:
             imgui.open_popup("her-menu")
             self.her_menu = False
@@ -440,7 +465,7 @@ class App:
             return
         if imgui.menu_item("Close the chat" if self.chat.phase == Phase.OPEN else "Chat", "", False)[0]:
             self.chat.character_clicked(self.loco)
-        hide = "Come out of the corner" if self.corner.wanted else "Hide in the corner"
+        hide = "Come out" if self.corner.wanted else "Hide at the side"
         if imgui.menu_item(hide, "", False)[0]:
             self.brain.send(SetHidden(not self.corner.wanted))
         imgui.end_popup()
@@ -456,11 +481,12 @@ class App:
         cursor = Vec2(*self.window.cursor())
         for press in frame_input.presses:
             if inside(c.screen_rect, press) and not self.ui.wants_mouse():
-                self.grab = Grab(press, False)
+                # Hidden at the side, a press on her is only ever a click.
+                self.grab = Grab(press, False, can_drag=self.corner.depth == 0.0)
         if self.grab.pressed_at is None:
             return
         if glfw.get_mouse_button(self.window.handle, glfw.MOUSE_BUTTON_LEFT) == glfw.PRESS:
-            if not self.grab.dragging and cursor.distance(self.grab.pressed_at) > DRAG_THRESHOLD:
+            if self.grab.can_drag and not self.grab.dragging and cursor.distance(self.grab.pressed_at) > DRAG_THRESHOLD:
                 self.grab.dragging = True
             if self.grab.dragging:
                 self.loco.drag_to(cursor, dt)
@@ -475,8 +501,9 @@ class App:
     def place(self, c: Character, arena: Vec2, dt: float) -> None:
         """Put the model where the body is — feet at its feet, rolled by its
         angle, scaled to its on-screen height, turned toward where it's
-        going, sunk as the knees give or it sits — and note its screen box,
-        which is what the mouse can grab."""
+        going, sunk as the knees give or it sits, or lying at the side of
+        the screen when she's hidden — and note its screen box, which is
+        what the mouse can grab."""
         lo, hi = c.bounds
         model_height = max(float(hi[1] - lo[1]), 1e-3)
         if self.workout.locked:
@@ -491,10 +518,10 @@ class App:
             return
         turn = qaxis((0.0, 1.0, 0.0), c.facing * math.pi / 2)
         c.yaw = qslerp(c.yaw, turn, min(TURN_RATE * dt, 1.0))
-        sink = (self.loco.limbs.crouch.x * CROUCH_DROP + self.loco.seat * SIT_DROP + self.corner.drop()) * HEIGHT_PX
-        feet = self.loco.feet(HEIGHT_PX) + Vec2(0.0, sink)
+        sink = (self.loco.limbs.crouch.x * CROUCH_DROP + self.loco.seat * SIT_DROP) * HEIGHT_PX
+        feet, angle = self.corner.pose(self.loco.feet(HEIGHT_PX) + Vec2(0.0, sink), self.loco.angle, arena, HEIGHT_PX)
         s = HEIGHT_PX / model_height
-        rotation = qmul(qaxis((0.0, 0.0, 1.0), self.loco.angle), c.yaw)
+        rotation = qmul(qaxis((0.0, 0.0, 1.0), angle), c.yaw)
         c.skeleton.root = compose(to_world(arena, feet), rotation, (s, s, s))
         corners = np.array([[x, y, z, 1.0] for x in (lo[0], hi[0]) for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
         world = corners @ c.skeleton.root.T

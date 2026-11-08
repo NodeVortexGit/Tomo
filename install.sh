@@ -8,7 +8,7 @@
 #      dialog, clipboard tools (to paste pictures into the chat), xdotool (for
 #      the mouse/keyboard control)
 #    • Tomo's Python environment (.venv, with uv if it's there, else venv+pip)
-#    • the speech and camera models (Piper voices, Vosk, Parakeet, Pose Lite)
+#    • the speech and camera models (Piper voices, BgTTS, Vosk, Parakeet, Pose Lite)
 #    • a .env from the template, and an entry in the app menu
 #    • a check for a local model server (Ollama or LM Studio), offering to
 #      download a model for Ollama
@@ -89,12 +89,12 @@ install_sysdeps || warn "Some system packages didn't install — carrying on; in
 say "Setting up Tomo's Python environment in .venv…"
 if command -v uv >/dev/null 2>&1; then
     [ -x "$VENV/bin/python" ] || uv venv --python 3.12 "$VENV"
-    uv pip install --python "$VENV/bin/python" -r "$ROOT/pyproject.toml" --extra all
+    uv pip install --python "$VENV/bin/python" --no-sources --torch-backend cpu -r "$ROOT/pyproject.toml" --extra all
 else
-    command -v python3 >/dev/null 2>&1 || die "Python 3 is needed (3.11 or newer)."
+    command -v python3 >/dev/null 2>&1 || die "Python 3 is needed (3.12 or newer)."
     [ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
     "$VENV/bin/pip" install --upgrade pip >/dev/null
-    "$VENV/bin/pip" install "$ROOT[all]"
+    "$VENV/bin/pip" install --extra-index-url https://download.pytorch.org/whl/cpu "$ROOT[all]"
 fi
 ok "Python environment ready: $VENV"
 
@@ -102,7 +102,7 @@ ok "Python environment ready: $VENV"
 if [ -n "${TOMO_SKIP_MODELS:-}" ]; then
     warn "Skipping the models (TOMO_SKIP_MODELS); later: .venv/bin/python scripts/setup_models.py"
 else
-    say "Downloading the speech and camera models (about 1 GB, once)…"
+    say "Downloading the speech and camera models (about 2 GB, once)…"
     if TOMO_DATA_DIR="$DATA_DIR" "$VENV/bin/python" "$ROOT/scripts/setup_models.py"; then
         ok "Models ready in $DATA_DIR"
     else

@@ -10,9 +10,9 @@ clicks; she lets go and drops to the floor. The brain moves the cursor
 the shared :class:`BodyState`.
 
 Consent and safety: only while the user allows control — the panic key
-(Pause, or Ctrl+Alt+Esc) takes it back at once, even mid-glide — and with
-the red "Tomo is controlling the desktop" badge showing the whole time.
-While it shows, her window lets every click through to the apps below.
+(Pause, or Ctrl+Alt+Esc) takes it back at once, even mid-glide — and in
+plain sight: she carries the cursor herself. Meanwhile her window lets
+every click through to the apps below.
 
 Windows uses SetCursorPos and SendInput; Linux xdotool (X11) or ydotool
 (Wayland), whichever is installed — without either, nothing moves.
@@ -94,8 +94,8 @@ class Hands:
 
     @contextlib.asynccontextmanager
     async def task(self):
-        """A task with the mouse and keyboard: the badge shows (and her
-        window lets clicks through) from start to end; she always lets go."""
+        """A task with the mouse and keyboard: from start to end her window
+        lets clicks through (ControlMode); she always lets go."""
         self.ui(ControlMode(True))
         try:
             yield self

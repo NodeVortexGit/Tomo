@@ -7,8 +7,8 @@ from it wherever it goes ("hold"); she lets go and drops ("drop").
 
 Consent and safety come first:
 
-* a red **"Tomo is controlling the desktop"** badge shows the whole time she
-  drives input, and her window lets every click through meanwhile;
+* she can be watched the whole time — she carries the cursor herself —
+  and her window lets every click through meanwhile;
 * the **panic key** — Pause, or Ctrl+Alt+Esc — releases control at once and
   tells the brain to stop (on Windows it works from anywhere while she's in
   control, even when another window has the keyboard).
@@ -20,13 +20,10 @@ import logging
 from dataclasses import dataclass
 from typing import Callable
 
-from imgui_bundle import imgui
-
 from .. import events, platform
 from ..events import PanicStop
 from .mathx import Vec2
 from .movement import Locomotion, Stance
-from .ui import ICON_MOUSE, flags, vec4
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +35,7 @@ RAISE_SECS = 0.3  # arms up before the cursor comes
 
 @dataclass
 class Control:
-    active: bool = False  # she's driving input: the badge shows
+    active: bool = False  # she's driving input
     carrying: str = ""  # "reach", "hold", or "" when she isn't
     reached_for: float = 0.0  # seconds her arms have been up for it
 
@@ -87,23 +84,6 @@ class Control:
         self.active = False
         send(PanicStop())
         log.warning("panic key: mouse/keyboard control released")
-
-    def draw_badge(self, width: float) -> None:
-        """The always-visible sign while she drives input."""
-        if not self.active:
-            return
-        imgui.set_next_window_pos(imgui.ImVec2(width * 0.5, 14.0), 0, imgui.ImVec2(0.5, 0.0))
-        imgui.push_style_color(imgui.Col_.window_bg.value, vec4(200, 60, 60, 235))
-        imgui.push_style_var(imgui.StyleVar_.window_rounding.value, 999.0)
-        imgui.push_style_var(imgui.StyleVar_.window_padding.value, imgui.ImVec2(14.0, 7.0))
-        w = imgui.WindowFlags_
-        imgui.begin("tomo-control-badge", None, flags(w.no_decoration, w.always_auto_resize, w.no_inputs,
-                                                      w.no_saved_settings, w.no_focus_on_appearing, w.no_nav))
-        imgui.text_colored(vec4(255, 255, 255), f"{ICON_MOUSE}  Tomo is controlling the desktop  ·  "
-                                                "press Pause to stop")
-        imgui.end()
-        imgui.pop_style_var(2)
-        imgui.pop_style_color()
 
 
 def panic_pressed_anywhere() -> bool:
