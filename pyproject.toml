@@ -26,7 +26,8 @@ speech = [
     "torch>=2.6",
     "torchaudio>=2.6",
     "soundfile>=0.12",
-    "miocodec @ git+https://github.com/Aratako/MioCodec@77473544375d57e96cbdfd5d7d257e8f280fa8e3",
+    # Not on PyPI: a fixed commit, as an archive (a git+ URL needs Git installed).
+    "miocodec @ https://github.com/Aratako/MioCodec/archive/77473544375d57e96cbdfd5d7d257e8f280fa8e3.zip",
     "vosk>=0.3.41",                              # "Hey Tomo" (wake_word.py)…
     "onnx-asr[cpu,hub]>=0.12",                   # …and what you say, in English or Bulgarian
     "sounddevice>=0.4; sys_platform != 'linux'", # the microphone (Linux uses parecord/pw-record/arecord)
