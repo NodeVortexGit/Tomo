@@ -15,13 +15,15 @@ Chats: the brain keeps which one is showing. A new chat starts empty, and
 any chat in the history can be opened again to read or carry on, renamed or
 deleted (the one showing, deleted, makes way for a new one); what Tomo
 knows about the user (preferences and memories) belongs to none of them.
-When the user leaves a chat, the model reads it once more, while Tomo is
+A message that starts with "/" is a command (slash.py), run here and never
+sent to the model. When the user leaves a chat, the model reads it once more, while Tomo is
 idle, for lasting facts about the user (:class:`ChatMemory`).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import queue
 import threading
@@ -29,18 +31,19 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import attachments as attached, characters, health, speech as speech_mod, wake as wake_mod
+from . import attachments as attached, characters, health, platform, speech as speech_mod, wake as wake_mod
 from .ai import AiClient, SharedCatalog
 from .apps import SystemCatalog
 from .commands import Executor
 from .config import Config
 from .db import Store
-from .events import (Attachment, BrainToUi, Characters, Chat, ChatLine, ChatList, ControlMode, Hide, ImportCharacter,
+from .events import (Animate, Attachment, BrainToUi, Characters, Chat, ChatSize, SetChatSize, ChatLine, ChatList, ControlMode, Hide, ImportCharacter,
                      DeleteChat, LoadCharacter, NewChat, OpenChat, PanicStop, RenameChat, Role, SetControlAllowed, SetHidden,
                      SetVoice, Shutdown,
                      Speaking, StartVoiceInput, Status, Transcript, UiToBrain, UserMessage, now_ms)
 from .hands import BodyState
 from .language import Language
+from .slash import Slash, is_command
 
 log = logging.getLogger(__name__)
 
@@ -151,6 +154,7 @@ async def run_loop(cfg: Config, inbox: asyncio.Queue, ui, body: BodyState | None
     ui(Characters(tuple(characters.available(db, cfg))))
     hidden = db.get_snapshot("hidden")
     ui(Hide(hidden is not None and hidden[0] == "1"))
+    ui(ChatSize(saved_chat_size(db)))
     # Pick the conversation up where it left off: the chat used last.
     chats = db.list_chats()
     chat = chats[0].id if chats else new_chat()
@@ -160,9 +164,23 @@ async def run_loop(cfg: Config, inbox: asyncio.Queue, ui, body: BodyState | None
     asyncio.get_running_loop().create_task(memory.run())
     ui(Status("ready"))
 
+    def ring(words: str) -> None:
+        """A timer is up: she waves and says so (or, with the voice off, a beep)."""
+        ui(Animate("wave"))
+        if voice_replies:
+            speak(speech, wake, ui, words)
+        else:
+            beep()
+
+    slash = Slash(db, ui, ring, lambda: speaks_bulgarian[0])
+
     while True:
         message = await inbox.get()
-        if isinstance(message, UserMessage):
+        if isinstance(message, UserMessage) and is_command(message.text):
+            # Shown, not kept: a command and its answer aren't the conversation.
+            ui(Chat(ChatLine(Role.USER, message.text.strip())))
+            ui(Chat(ChatLine(Role.SYSTEM, slash.run(message.text))))
+        elif isinstance(message, UserMessage):
             if message.text.strip():
                 speaks_bulgarian[0] = Language.of(message.text) == Language.BULGARIAN
             images = await attach(cfg, message.images, ui) if message.images else ()
@@ -191,6 +209,8 @@ async def run_loop(cfg: Config, inbox: asyncio.Queue, ui, body: BodyState | None
                 show_chat(db, chat, ui)
             else:
                 ui(ChatList(tuple(db.list_chats()), chat))
+        elif isinstance(message, SetChatSize):
+            db.set_snapshot("chat-size", "", json.dumps([round(v, 1) for v in message.rect]))
         elif isinstance(message, SetHidden):
             db.set_snapshot("hidden", "1" if message.on else "0", "")
             ui(Hide(message.on))
@@ -224,6 +244,7 @@ async def run_loop(cfg: Config, inbox: asyncio.Queue, ui, body: BodyState | None
                 control_allowed.clear()
         elif isinstance(message, Shutdown):
             log.info("brain shutting down")
+            slash.stop()
             return
 
 
@@ -238,6 +259,16 @@ async def attach(cfg: Config, paths: tuple[Path, ...], ui) -> tuple[Attachment, 
             log.warning("couldn't attach %s: %s", path, e)
             ui(Chat(ChatLine(Role.SYSTEM, f"Couldn't attach {Path(path).name}: {e}")))
     return tuple(out)
+
+
+def saved_chat_size(db: Store) -> tuple[float, float, float, float] | None:
+    """The chat window's size as the user left it (None: never resized)."""
+    saved = db.get_snapshot("chat-size")
+    try:
+        rect = tuple(float(v) for v in json.loads(saved[1])) if saved else None
+    except (ValueError, TypeError):
+        return None
+    return rect if rect is not None and len(rect) == 4 else None
 
 
 def new_chat() -> str:
@@ -287,9 +318,16 @@ async def handle_user_text(db: Store, ai: AiClient, speech, wake, ui, text: str,
     if speech is None or not speech_mod.speakable(reply):
         return
 
+    speak(speech, wake, ui, reply)
+
+
+def speak(speech, wake, ui, words: str) -> None:
+    """Say ``words`` in the background, with the wake word muted so Tomo's
+    own voice can't trigger it."""
+
     async def say() -> None:
         try:
-            audio = await speech.synthesize(reply)
+            audio = await speech.synthesize(words)
         except Exception as e:  # noqa: BLE001
             log.warning("tts failed: %s", e)
             if (note := speech.first_failure_note(e)) is not None:
@@ -308,6 +346,14 @@ async def handle_user_text(db: Store, ai: AiClient, speech, wake, ui, text: str,
                 wake.mute(False)
 
     asyncio.get_running_loop().create_task(say())
+
+
+def beep() -> None:
+    """The system's notification sound (Windows; elsewhere, nothing)."""
+    if platform.WINDOWS:
+        import winsound
+
+        winsound.MessageBeep(winsound.MB_ICONASTERISK)
 
 
 def load_cached_catalog(db: Store) -> SystemCatalog:

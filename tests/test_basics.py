@@ -309,3 +309,15 @@ def test_a_fitting_jpeg_goes_through_untouched():
     jpeg = encoded(1920, 1080, "JPEG")
     shot = fit_for_model(jpeg)
     assert shot.jpeg == jpeg and shot.scale == 1.0
+
+
+def test_the_chat_windows_size_is_kept_for_the_next_start():
+    from tomo import brain
+    from tomo.db import Store
+
+    db = Store(None)
+    assert brain.saved_chat_size(db) is None
+    db.set_snapshot("chat-size", "", "[600.5, 40, 1896, 1000]")
+    assert brain.saved_chat_size(db) == (600.5, 40.0, 1896.0, 1000.0)
+    db.set_snapshot("chat-size", "", "not a size")
+    assert brain.saved_chat_size(db) is None

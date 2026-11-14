@@ -60,7 +60,7 @@ snapshots пречи на повторение. Старият файл не с�
 3. ОСНОВНИ ЕЛЕМЕНТИ
   Store(path, embeddings) — нишково-безопасна (всяко извикване взима ключ)
     set_pref / get_pref / all_prefs
-    add_memory / top_memories / search_memories
+    add_memory / top_memories / search_memories / forget_memory / forget_pref
     add_message(line, chat) / recent_messages(limit, chat) / chat_lines /
     list_chats / remembered / set_remembered / search_messages /
     split_into_chats / knows

@@ -610,3 +610,42 @@ def test_desktops_are_recognised():
     assert detect_desktop("Hyprland") == Desktop.HYPRLAND
     assert detect_desktop("i3") == Desktop.I3
     assert detect_desktop("whatever") == Desktop.OTHER
+
+
+def test_the_chat_window_resizes_by_its_edges_and_corners_within_the_screen():
+    from tomo.body.chat import (BOTTOM, LEFT, LEFT_ROOM, MARGIN, PANEL_H, PANEL_W, RIGHT, TOP, dragged, edges_at,
+                                fit_panel)
+
+    rect = panel_rect(1920, 1080)
+    x0, y0, x1, y1 = rect
+    assert edges_at(rect, x0 + 2, (y0 + y1) / 2) == LEFT
+    assert edges_at(rect, (x0 + x1) / 2, y1 - 3) == BOTTOM
+    assert edges_at(rect, x0 + 3, y0 + 15) == LEFT | TOP, "near a corner: both ways (its tip is rounded off)"
+    assert edges_at(rect, x1 - 15, y1 - 2) == RIGHT | BOTTOM
+    assert edges_at(rect, (x0 + x1) / 2, (y0 + y1) / 2) == 0 and edges_at(rect, x0 - 3, y0 + 100) == 0
+    # The dragged edges move, the others stay.
+    assert dragged(rect, LEFT | TOP, -300, -100, 1920, 1080) == (x0 - 300, y0 - 100, x1, y1)
+    # Never smaller than the usual size…
+    assert dragged(rect, LEFT, 200, 0, 1920, 1080) == rect
+    assert dragged(rect, BOTTOM, 0, -500, 1920, 1080)[3] == y0 + PANEL_H
+    # …nor off the screen, nor over the room she needs on the left.
+    assert dragged(rect, LEFT | TOP, -5000, -5000, 1920, 1080)[:2] == (LEFT_ROOM, MARGIN)
+    assert dragged(rect, RIGHT, 500, 0, 1920, 1080)[2] == 1920 - MARGIN
+    # A size kept from a bigger screen fits a smaller one.
+    big = (300.0, 30.0, 2500.0, 1400.0)
+    assert fit_panel(big, 1280, 720) == (LEFT_ROOM, MARGIN, 1280 - MARGIN, 720 - MARGIN)
+    small = fit_panel((1000.0, 100.0, 1100.0, 200.0), 1920, 1080)
+    assert (small[2] - small[0], small[3] - small[1]) == (PANEL_W, PANEL_H)
+
+
+def test_she_stands_beside_the_window_as_the_user_sized_it():
+    from tomo.events import ChatSize
+
+    chat, loco = ChatState(), settled()
+    usual = chat.dock(loco)
+    chat.receive(ChatSize((800.0, 100.0, 1896.0, 900.0)), None)
+    assert chat.rect(1920, 1080) == (800.0, 100.0, 1896.0, 900.0)
+    assert chat.dock(loco) < usual, "further left, beside the wider window"
+    assert abs(chat.dock(loco) * 1920 + body_size(loco.height).x + DOCK_GAP - 800.0) < 1.0
+    chat.receive(ChatSize(None), None)
+    assert chat.rect(1920, 1080) == panel_rect(1920, 1080)

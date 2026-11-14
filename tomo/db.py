@@ -163,6 +163,14 @@ class Store:
                               metadatas=[{"kind": kind or "fact", "importance": int(importance), "created_at": created}])
         return memory_id
 
+    def forget_memory(self, memory_id: str) -> None:
+        with self._lock:
+            self.memories.delete(ids=[memory_id])
+
+    def forget_pref(self, key: str) -> None:
+        with self._lock:
+            self.preferences.delete(ids=[key])
+
     def _all_memories(self) -> list[Memory]:
         with self._lock:
             got = self.memories.get()

@@ -31,6 +31,17 @@ They wait above the text box — click one to take it off — and go with the
 next message; the brain adds what the system knows about each (see
 tomo/attachments.py). In the transcript, click a picture to open it.
 
+The window resizes like a desktop app's: drag any edge or corner (the
+pointer shows the arrows). It's never smaller than the usual size, stays on
+the screen with room on its left for her, and she walks to its new side.
+The size is kept for the next start (SetChatSize; the brain sends it back
+as ChatSize).
+
+Typing "/" offers the slash commands (slash.py) above the text box, as
+they fit what's typed: click one, or press Tab for the first, to put it in
+the box. A command goes to the brain like a message, without the pictures
+waiting (they stay for the next message).
+
 Any of the conversation's text can be selected and copied, as in a browser:
 drag across it (from one message into the next, too), double-click for a
 word, triple-click for a paragraph, Shift+click to extend, Ctrl+A for all of
@@ -59,8 +70,9 @@ from typing import Callable, NamedTuple
 from imgui_bundle import imgui
 
 from .. import attachments, events, platform
+from ..slash import Command, is_command, suggestions
 from ..events import (CharacterChoice, ChatInfo, ChatLine, DeleteChat, ImportCharacter, NewChat, OpenChat, RenameChat,
-                      Role, SetHidden, SetVoice, Shutdown, StartVoiceInput, UserMessage)
+                      Role, SetChatSize, SetHidden, SetVoice, Shutdown, StartVoiceInput, UserMessage)
 from .movement import Locomotion, body_size
 from .ui import (ICON_CHECK, ICON_CLOSE, ICON_COPY, ICON_DELETE, ICON_HIDE, ICON_HISTORY, ICON_IMAGE, ICON_MIC,
                  ICON_MUTED, ICON_NEW_CHAT, ICON_PAPERCLIP, ICON_POWER, ICON_RENAME, ICON_SEND, ICON_SHOW, ICON_USER,
@@ -71,7 +83,11 @@ log = logging.getLogger(__name__)
 DOCK_GAP = 24.0  # logical px between her body and the panel while the chat is out
 LIQUID_GROW_SECS = 0.55  # for the liquid to come fully out…
 LIQUID_MELT_SECS = 0.40  # …and to melt back
-PANEL_W, PANEL_H = 340.0, 460.0  # logical px
+PANEL_W, PANEL_H = 340.0, 460.0  # logical px: the usual size, and the smallest
+GRIP = 6.0  # px inside the window's edge that resize it…
+CORNER = 24.0  # …and how far from a corner they resize both ways
+LEFT_ROOM = 200.0  # px the window always leaves on the left, for her
+LEFT, TOP, RIGHT, BOTTOM = 1, 2, 4, 8  # the edges being dragged
 MARGIN = 24.0  # from the screen's right edge
 TRANSCRIPT_LIMIT = 400  # lines kept on screen; the full history is in the memory
 ACCENT = (120, 230, 240)
@@ -107,19 +123,76 @@ def panel_rect(width: float, height: float) -> tuple[float, float, float, float]
     return x1 - PANEL_W, y0, x1, y0 + PANEL_H
 
 
-def dock_x(width: float, half_body: float) -> float:
+def fit_panel(rect, width: float, height: float) -> tuple[float, float, float, float]:
+    """A size the user chose, made to fit this screen: no smaller than the
+    usual size, inside the margins, with room left of it for her."""
+    x0, y0, x1, y1 = rect
+    w = max(PANEL_W, min(x1 - x0, width - MARGIN - LEFT_ROOM))
+    h = max(PANEL_H, min(y1 - y0, height - 2 * MARGIN))
+    x1 = min(max(x1, LEFT_ROOM + w), width - MARGIN)
+    y0 = max(MARGIN, min(y0, height - MARGIN - h))
+    return x1 - w, y0, x1, y0 + h
+
+
+def dragged(rect, edges: int, dx: float, dy: float, width: float, height: float) -> tuple[float, float, float, float]:
+    """``rect`` with the ``edges`` being dragged moved by (dx, dy): the other
+    edges stay, and it keeps to the usual size at the least and to the screen."""
+    x0, y0, x1, y1 = rect
+    if edges & LEFT:
+        x0 = min(max(x0 + dx, LEFT_ROOM), x1 - PANEL_W)
+    if edges & RIGHT:
+        x1 = max(min(x1 + dx, width - MARGIN), x0 + PANEL_W)
+    if edges & TOP:
+        y0 = min(max(y0 + dy, MARGIN), y1 - PANEL_H)
+    if edges & BOTTOM:
+        y1 = max(min(y1 + dy, height - MARGIN), y0 + PANEL_H)
+    return x0, y0, x1, y1
+
+
+def edges_at(rect, x: float, y: float) -> int:
+    """Which edges of the window a press at (x, y) would drag: within GRIP
+    of an edge, and both near a corner (0: none)."""
+    x0, y0, x1, y1 = rect
+    if not (x0 <= x <= x1 and y0 <= y <= y1):
+        return 0
+    near = {LEFT: x - x0, RIGHT: x1 - x, TOP: y - y0, BOTTOM: y1 - y}
+    edges = 0
+    for edge, distance in near.items():
+        if distance <= GRIP:
+            edges |= edge
+    # Close to a corner along an edge: that corner (its very tip is rounded off).
+    if edges & (LEFT | RIGHT) and min(near[TOP], near[BOTTOM]) <= CORNER:
+        edges |= TOP if near[TOP] <= near[BOTTOM] else BOTTOM
+    if edges & (TOP | BOTTOM) and min(near[LEFT], near[RIGHT]) <= CORNER:
+        edges |= LEFT if near[LEFT] <= near[RIGHT] else RIGHT
+    return edges
+
+
+def resize_pointer(edges: int):
+    """The pointer's shape for dragging these edges."""
+    shapes = imgui.MouseCursor_
+    if edges in (LEFT | TOP, RIGHT | BOTTOM):
+        return shapes.resize_nwse
+    if edges in (RIGHT | TOP, LEFT | BOTTOM):
+        return shapes.resize_nesw
+    return shapes.resize_ew if edges & (LEFT | RIGHT) else shapes.resize_ns
+
+
+def dock_x(width: float, half_body: float, left: float | None = None) -> float:
     """Where she stands while the chat is out (her feet's x, logical px):
-    left of the panel, with her body's half-width and DOCK_GAP between her
-    and its edge, so the window never covers her."""
-    return max(half_body, panel_rect(width, 0.0)[0] - DOCK_GAP - half_body)
+    left of the panel (whose left edge is ``left``; None: the usual one),
+    with her body's half-width and DOCK_GAP between her and its edge, so
+    the window never covers her."""
+    left = panel_rect(width, 0.0)[0] if left is None else left
+    return max(half_body, left - DOCK_GAP - half_body)
 
 
-def dock_fraction(loco: Locomotion) -> float:
+def dock_fraction(loco: Locomotion, left: float | None = None) -> float:
     """:func:`dock_x` as the share of the width that ``walk_to`` takes."""
     width = loco.arena.x
     if width <= 0.0:  # not on screen yet
         return 0.5
-    return dock_x(width, body_size(loco.height).x) / width
+    return dock_x(width, body_size(loco.height).x, left) / width
 
 
 def inside(rect, x: float, y: float) -> bool:
@@ -373,6 +446,11 @@ class ChatState:
     renaming: str = ""  # the chat being renamed…
     new_title: str = ""  # …what's typed for it…
     focus_title: bool = False  # …and that the box takes the keyboard next
+    complete_to: str | None = None  # a slash command to put in the text box, cursor at its end
+    panel: tuple[float, float, float, float] | None = None  # the window as the user sized it (None: the usual)
+    resizing: int = 0  # the edges being dragged…
+    resize_from: tuple = ()  # …from where: (pointer x, y, the window then)
+    redock: bool = False  # she walks to the window's new side
     hidden: bool = False  # she's set to hide at the side of the screen
     input: str = ""
     thinking: bool = False
@@ -440,6 +518,11 @@ class ChatState:
         text = self.input.strip()
         if not text and not self.attachments:
             return False
+        if is_command(text):
+            send(UserMessage(text, ()))
+            self.input = ""
+            self.note_after_reply("The command runs once Tomo has answered")
+            return True
         # No local echo: the brain echoes the user's line back (one source of
         # truth for the chat, the memory and the model).
         send(UserMessage(text, tuple(self.attachments)))
@@ -472,6 +555,8 @@ class ChatState:
             self.scroll_to_end = True
         elif isinstance(event, events.ChatList):
             self.chats, self.current_chat = list(event.chats), event.current
+        elif isinstance(event, events.ChatSize):
+            self.panel, self.redock = event.rect, True
         elif isinstance(event, events.Thinking):
             self.thinking = event.on
             self.scroll_to_end = True
@@ -491,12 +576,20 @@ class ChatState:
         (the liquid grows once she's there)."""
         self.phase = Phase.SLIDING
         loco.held = True
-        loco.walk_to(dock_fraction(loco))
+        loco.walk_to(self.dock(loco))
 
     def keep_clear(self, position: float, loco: Locomotion) -> float:
         """Where she may walk (a share of the width) when asked to: while the
         chat is out, no further right than the dock, so it never covers her."""
-        return position if self.phase == Phase.CLOSED else min(position, dock_fraction(loco))
+        return position if self.phase == Phase.CLOSED else min(position, self.dock(loco))
+
+    def rect(self, width: float, height: float) -> tuple[float, float, float, float]:
+        """Where the window is (x0, y0, x1, y1): as the user sized it, or the usual place."""
+        return panel_rect(width, height) if self.panel is None else fit_panel(self.panel, width, height)
+
+    def dock(self, loco: Locomotion) -> float:
+        """Where she stands while the chat is out, beside the window (see :func:`dock_fraction`)."""
+        return dock_fraction(loco, self.rect(loco.arena.x, loco.arena.y)[0])
 
     def dismiss(self, escape: bool, clicked_at: tuple[float, float] | None, character_rect, width: float,
                 height: float) -> None:
@@ -506,16 +599,17 @@ class ChatState:
             return
         escape = escape and not self.history_open
         away = clicked_at is not None and not inside(character_rect, *clicked_at) and not inside(
-            panel_rect(width, height), *clicked_at)
+            self.rect(width, height), *clicked_at)
         if escape or away:
             self.phase = Phase.CLOSING
 
     def advance(self, dt: float, loco: Locomotion | None) -> bool:
         """Move the animation on. True while it's moving."""
         # A character swapped in while the chat is out comes over to it too.
-        if self.phase != Phase.CLOSED and loco is not None and not loco.held:
+        if self.phase != Phase.CLOSED and loco is not None and (not loco.held or self.redock):
             loco.held = True
-            loco.walk_to(dock_fraction(loco))
+            loco.walk_to(self.dock(loco))
+        self.redock = False
         if self.phase != Phase.OPEN:
             self.selection.dragging = False  # a drag doesn't outlive the window
         if self.phase == Phase.SLIDING:
@@ -546,8 +640,9 @@ class ChatState:
         if self.phase == Phase.CLOSED:
             return False
         t = ease_out_cubic(self.liquid_t)
-        start = source or (panel_rect(width, height)[0] - DOCK_GAP, height * 0.5)
-        draw_liquid(start, t, width, height)
+        rect = self.rect(width, height)
+        start = source or (rect[0] - DOCK_GAP, height * 0.5)
+        draw_liquid(start, t, rect)
         if self.phase == Phase.OPEN or self.liquid_t > 0.85:
             close, quit_ = self.draw_window(ui, t, width, height, showing, send)
             if close:
@@ -559,14 +654,15 @@ class ChatState:
 
     def draw_window(self, ui, t: float, width: float, height: float, showing: Path | None,
                     send: Callable) -> tuple[bool, bool]:
-        x0, y0, _, _ = panel_rect(width, height)
+        x0, y0, x1, y1 = self.rect(width, height)
         imgui.set_next_window_pos(imgui.ImVec2(x0, y0))
-        imgui.set_next_window_size(imgui.ImVec2(PANEL_W, PANEL_H))
+        imgui.set_next_window_size(imgui.ImVec2(x1 - x0, y1 - y0))
         imgui.push_style_color(imgui.Col_.window_bg.value, vec4(20, 28, 34, 245 * t))
         imgui.push_style_var(imgui.StyleVar_.window_padding.value, imgui.ImVec2(14.0, 14.0))
         w = imgui.WindowFlags_
         imgui.begin("tomo-chat", None, flags(w.no_decoration, w.no_move, w.no_saved_settings, w.no_scroll_with_mouse))
         close = quit_ = False
+        pointer = self.resize((x0, y0, x1, y1), width, height, send)
 
         # The header: her name and the chats (a new one, the earlier ones);
         # then (from the right) close, quit, voice, hiding, character.
@@ -623,6 +719,8 @@ class ChatState:
             row += PENDING_EDGE + spacing_y
         if noticing:
             row += imgui.get_text_line_height() + spacing_y
+        hints = suggestions(self.input)
+        row += len(hints) * (imgui.get_text_line_height() + spacing_y)
         imgui.begin_child("transcript", imgui.ImVec2(0.0, -row))
         font = imgui.get_font_baked()
         self.placed, self.hovered = [], None
@@ -648,6 +746,8 @@ class ChatState:
             imgui.text_colored(vec4(150, 150, 150), self.notice)
         if self.attachments:
             self.draw_pending(ui.thumbnails)
+        if hints:
+            self.draw_suggestions(hints)
 
         # The input row: pictures, the text box, Send, Talk.
         pad = imgui.get_style().frame_padding.x * 2
@@ -661,8 +761,12 @@ class ChatState:
             imgui.set_keyboard_focus_here()
             self.focus_input = False
         hint = "Say something about them…" if self.attachments else "Say something…"
-        entered, self.input = imgui.input_text_with_hint("##say", hint, self.input,
-                                                         flags(imgui.InputTextFlags_.enter_returns_true))
+        entered, self.input = imgui.input_text_with_hint(
+            "##say", hint, self.input,
+            flags(imgui.InputTextFlags_.enter_returns_true, imgui.InputTextFlags_.callback_completion,
+                  imgui.InputTextFlags_.callback_always), self.text_box_event)
+        if not self.input and imgui.is_item_hovered():
+            imgui.set_tooltip("Type / for commands")
         imgui.same_line()
         clicked = imgui.button(f"{ICON_SEND} Send")
         if entered or clicked:
@@ -673,10 +777,62 @@ class ChatState:
             send(StartVoiceInput())
         if imgui.is_item_hovered():
             imgui.set_tooltip('Push to talk (or just say "Hey Tomo")')
+        if pointer:  # last, over whatever the pointer passes while it drags
+            imgui.set_mouse_cursor(resize_pointer(pointer))
         imgui.end()
         imgui.pop_style_var()
         imgui.pop_style_color()
         return close, quit_
+
+    def resize(self, rect, width: float, height: float, send: Callable) -> int:
+        """Resizing the window by its edges and corners, as with a desktop
+        app's. Returns the edges under the pointer or being dragged, for the
+        pointer's shape (0: none). The size is kept for the next start."""
+        mouse = imgui.get_io().mouse_pos
+        if self.resizing:
+            if imgui.is_mouse_down(0):
+                x, y, start = self.resize_from
+                self.panel = dragged(start, self.resizing, mouse.x - x, mouse.y - y, width, height)
+                return self.resizing
+            edges, self.resizing, self.redock = self.resizing, 0, True
+            send(SetChatSize(self.rect(width, height)))
+            return edges
+        # Not under a menu, nor while something in the window is in use.
+        if not imgui.is_window_hovered() or imgui.is_any_item_active():
+            return 0
+        edges = edges_at(rect, mouse.x, mouse.y)
+        if edges and imgui.is_mouse_clicked(0):
+            self.resizing, self.resize_from = edges, (mouse.x, mouse.y, rect)
+        return edges
+
+    def draw_suggestions(self, hints: list[Command]) -> None:
+        """The slash commands that fit what's typed, each with what it does;
+        clicking one puts it in the text box."""
+        draw = imgui.get_window_draw_list()
+        width = imgui.get_content_region_avail().x
+        for i, command in enumerate(hints):
+            usage = command.fill.rstrip() + (" " + command.args.strip() if command.args else "")
+            clicked, _ = imgui.selectable(f"{usage}##slash-{i}", False)
+            lo = imgui.get_item_rect_min()
+            x = lo.x + imgui.calc_text_size(usage).x + 12.0
+            draw.add_text(imgui.ImVec2(x, lo.y), rgba(150, 150, 150), fit(command.about, lo.x + width - x))
+            if clicked:
+                self.complete_to, self.focus_input = command.fill, True
+
+    def text_box_event(self, data) -> int:
+        """The text box's callback: Tab completes a slash command, and a
+        command picked from the list goes in with the cursor at its end."""
+        if data.event_flag == imgui.InputTextFlags_.callback_completion.value:
+            hints = suggestions(data.buf)
+            if hints:
+                self.complete_to = hints[0].fill
+        if self.complete_to is not None:
+            data.delete_chars(0, data.buf_text_len)
+            data.insert_chars(0, self.complete_to)
+            data.cursor_pos = data.buf_text_len
+            data.clear_selection()
+            self.complete_to = None
+        return 0
 
     def draw_pending(self, thumbnails) -> None:
         """The pictures waiting to go with the next message, small; clicking
@@ -1155,11 +1311,11 @@ def pictures(line: ChatLine, thumbnails, place: Callable[[float], None], widest:
     imgui.pop_style_var()
 
 
-def draw_liquid(start: tuple[float, float], t: float, width: float, height: float) -> None:
+def draw_liquid(start: tuple[float, float], t: float, rect) -> None:
     """A blob of merging circles that eases from the character into the
-    panel's shape."""
+    panel's shape (``rect``)."""
     painter = imgui.get_background_draw_list()
-    x0, y0, x1, y1 = panel_rect(width, height)
+    x0, y0, x1, y1 = rect
     target = ((x0 + x1) * 0.5, (y0 + y1) * 0.5)
     cx, cy = start[0] + (target[0] - start[0]) * t, start[1] + (target[1] - start[1]) * t
     fill = rgba(64, 196, 208, int(220 * t))  # a soft, glossy teal that reads on any wallpaper

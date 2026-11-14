@@ -77,7 +77,11 @@ KEYS = {
     glfw.KEY_LEFT_SUPER: imgui.Key.left_super, glfw.KEY_RIGHT_SUPER: imgui.Key.right_super,
 }
 # The pointer's shape over the interface, as ImGui asks (anything else: the arrow).
-POINTERS = {imgui.MouseCursor_.text_input.value: glfw.IBEAM_CURSOR, imgui.MouseCursor_.hand.value: glfw.HAND_CURSOR}
+POINTERS = {imgui.MouseCursor_.text_input.value: glfw.IBEAM_CURSOR, imgui.MouseCursor_.hand.value: glfw.HAND_CURSOR,
+            imgui.MouseCursor_.resize_ew.value: glfw.RESIZE_EW_CURSOR,
+            imgui.MouseCursor_.resize_ns.value: glfw.RESIZE_NS_CURSOR,
+            imgui.MouseCursor_.resize_nwse.value: glfw.RESIZE_NWSE_CURSOR,
+            imgui.MouseCursor_.resize_nesw.value: glfw.RESIZE_NESW_CURSOR}
 
 
 @dataclass
@@ -540,10 +544,10 @@ class App:
             r = c.screen_rect
             if r[0] - GRAB_MARGIN <= x <= r[2] + GRAB_MARGIN and r[1] - GRAB_MARGIN <= y <= r[3] + GRAB_MARGIN:
                 return True
+        if self.chat.resizing:  # the pointer may be well outside it while the window is resized
+            return True
         if self.chat.shown():
-            from .chat import panel_rect
-
-            x0, y0, x1, y1 = panel_rect(width, height)
+            x0, y0, x1, y1 = self.chat.rect(width, height)
             return x0 <= x <= x1 and y0 <= y <= y1
         return False
 

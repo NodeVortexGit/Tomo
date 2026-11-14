@@ -124,6 +124,14 @@ class DeleteChat:
 
 
 @dataclass(frozen=True)
+class SetChatSize:
+    """The user has resized the chat window: where it is now (x0, y0, x1,
+    y1, logical px), to keep for the next start."""
+
+    rect: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
 class SetHidden:
     """Hide her at the side of the screen, or bring her out."""
 
@@ -136,7 +144,7 @@ class Shutdown:
 
 
 UiToBrain = (UserMessage | StartVoiceInput | ImportCharacter | PanicStop | SetControlAllowed | SetVoice | NewChat
-             | OpenChat | SetHidden | Shutdown)
+             | OpenChat | RenameChat | DeleteChat | SetChatSize | SetHidden | Shutdown)
 
 
 # ---- brain → body -------------------------------------------------------------------
@@ -187,6 +195,13 @@ class Hide:
     her head poking out, until the chat or a task brings her out."""
 
     on: bool
+
+
+@dataclass(frozen=True)
+class ChatSize:
+    """The chat window's size, as the user left it (None: the usual one)."""
+
+    rect: tuple[float, float, float, float] | None
 
 
 @dataclass(frozen=True)
@@ -251,6 +266,6 @@ class Pose:
 
 
 BrainToUi = (
-    Chat | Transcript | ChatList | Emote | WalkTo | Carry | Hide | ControlMode | Animate | Thinking | Listening
+    Chat | Transcript | ChatList | ChatSize | Emote | WalkTo | Carry | Hide | ControlMode | Animate | Thinking | Listening
     | Speaking | LoadCharacter | Characters | Status | HealthLock | HealthProgress | Pose
 )

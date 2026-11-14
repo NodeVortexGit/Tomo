@@ -29,6 +29,11 @@ run_loop() при стартиране:
      използван чат (Transcript — целия, до 400 реда — и ChatList), пуска
      ChatMemory и Status("ready").
 След това чака съобщения:
+  UserMessage с „/“ → командата (slash.py): тя и отговорът на Slash.run
+                    се показват, не се записват. Таймер, който изтече: тя маха
+                    и го казва на глас (speak; при изключен глас — beep).
+  SetChatSize     → размерът на чата в snapshots („chat-size“); при
+                    стартиране се праща обратно като ChatSize.
   UserMessage     → attach(): копия и метаданни на снимките (ако има,
                     attachments.prepare; нечетима снимка → бележка в чата);
                     после handle_user_text(): връща репликата (със снимките)
