@@ -158,7 +158,7 @@ change_character. Проверено с истинския модел: 6 от 6 
     (without_thinking);
   - модел, който не приема изображения, получава заявката отново без тях.
 
-Изпълнение на инструментите (dispatch_tool): виж Приложение А в README.md —
+Изпълнение на инструментите (dispatch_tool): виж Приложение А в docs/TECHNICAL.md —
 execute_command, remember, set_preference, recall, walk_to, express,
 animate, change_character, set_voice, list_apps, open_app, close_app,
 window_state, hide, click_at, type_text, set_volume, look_at_screen,
@@ -217,7 +217,7 @@ OPEN“; отварянето през менюто „Старт“ (кликв
 6. ЗА ЕКИПА
 - Бърза проверка с истинския модел: python -m tomo ask --run "въпрос".
 - Нов инструмент: описание в tool_specs(), изпълнение в dispatch_tool(),
-  тест в test_ai.py, ред в README.md (Приложение А).
+  тест в test_ai.py, ред в docs/TECHNICAL.md (Приложение А).
 - Описанията на инструментите са кратки нарочно — всеки токен струва време.
 - Отказаната команда връща "REFUSED … Nothing was done" — не променяйте
   тези думи: по тях моделът разбира, че нищо не е станало.

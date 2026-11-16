@@ -22,7 +22,7 @@
     uv pip install -r pyproject.toml --extra all --extra dev
 
 2. .env.example — ОБРАЗЕЦЪТ НА НАСТРОЙКИТЕ
-Всяка настройка с обяснение (виж 02-tomo.config и README.md, раздел 5).
+Всяка настройка с обяснение (виж 02-tomo.config и docs/TECHNICAL.md, раздел 5).
 Инсталаторите го копират като .env, ако такъв още няма.
 
 3. WINDOWS — packaging/windows/
