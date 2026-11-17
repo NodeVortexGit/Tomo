@@ -1,4 +1,4 @@
-# Tomo — техническа документация
+# Tomo — техническа документация (архив)
 
 Кратко представяне на проекта: [README.md](../README.md); подробното MVP:
 [MVP.md](MVP.md). Тук е всичко останало: възможностите в подробности,
@@ -609,7 +609,7 @@ tomo/
 ├── assets/characters/        # VRM моделите
 ├── packaging/windows/        # инсталаторът за Windows (Inno Setup)
 ├── .github/workflows/        # CI: тестове и инсталатор
-├── docs/                     # документацията: MVP.md, TECHNICAL.md, screenshots/
+├── docs/                     # документацията: MVP.md, archive.md, screenshots/
 ├── drafts/                   # чернови: описанията на модулите за екипа
 ├── install.sh                # инсталаторът за Linux
 ├── pyproject.toml            # пакетите и зависимостите
