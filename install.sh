@@ -8,7 +8,7 @@
 #      dialog, clipboard tools (to paste pictures into the chat), xdotool (for
 #      the mouse/keyboard control)
 #    • Tomo's Python environment (.venv, with uv if it's there, else venv+pip)
-#    • the speech and camera models (Piper voices, BgTTS, Vosk, Parakeet, Pose Lite)
+#    • the speech and camera models (BgTTS, Vosk, Parakeet, Pose Lite)
 #    • a .env from the template, and an entry in the app menu
 #    • a check for a local model server (Ollama or LM Studio), offering to
 #      download a model for Ollama

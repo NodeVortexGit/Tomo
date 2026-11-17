@@ -4,10 +4,10 @@
   Vosk, small English    spots "Hey Tomo"          <data>/models/vosk-model-small-en-us-0.15
   Parakeet TDT 0.6B v3   turns speech into text,   <data>/models/parakeet-tdt-0.6b-v3
                          English or Bulgarian
-  two Piper voices       Tomo's English voice,     <data>/voices/<voice>.onnx
-                         male and female
-  BgTTS-38M-V2           Tomo's Bulgarian voice,   <data>/models/bgtts-38m-v2
-                         male and female
+  BgTTS-38M-V2           Tomo's voice, English     <data>/models/bgtts-38m-v2
+                         and Bulgarian, male and
+                         female (cloned from its
+                         own samples)
   MioCodec, WavLM        what BgTTS sounds with    <data>/models/miocodec-25hz-24khz,
                                                    <data>/models/torch
   MediaPipe Pose Lite    the joints, for the       <data>/models/pose_landmarker_lite.task
@@ -36,15 +36,13 @@ STT_REPO = "istupakov/parakeet-tdt-0.6b-v3-onnx"
 STT_FILES = ["config.json", "vocab.txt", "encoder-model.int8.onnx", "decoder_joint-model.int8.onnx"]
 POSE = "pose_landmarker_lite.task"
 POSE_URL = f"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/{POSE}"
-DEFAULT_VOICE_MALE = "en_GB-alan-medium"
-DEFAULT_VOICE_FEMALE = "en_GB-cori-medium"
 # Bulgarian and English speech that clones a voice from a recording (Apache-2.0;
 # MioCodec: MIT). Fixed revisions, because the model's own Python runs from here.
 BGTTS = "bgtts-38m-v2"
 BGTTS_REPO = "beleata74/BgTTS-38M-V2"
 BGTTS_REVISION = "3f6ca06b3ca78352eb00d8e96349c0bedaa3d2f1"
 BGTTS_FILES = ["checkpoint_inference.pt", "codec.py", "config.py", "inference.py", "model.py", "tokenizer.py",
-               "samples/*_bg*.wav"]
+               "samples/*_bg*.wav", "samples/*_en*.wav"]
 CODEC = "miocodec-25hz-24khz"
 CODEC_REPO = "Aratako/MioCodec-25Hz-24kHz"
 CODEC_REVISION = "3a737f0de2c6324cb2fe40c1fbd1056c7add423d"
@@ -93,23 +91,15 @@ def fetch_pose(models):
         target.write_bytes(response.read())
 
 
-def fetch_voice(voices, voice):
-    if (voices / f"{voice}.onnx").exists():
-        return say(f"  The voice is already there ({voice})")
-    say(f"  Downloading a voice for Tomo ({voice}, about 60 MB)…")
-    from piper.download_voices import download_voice
-
-    voices.mkdir(parents=True, exist_ok=True)
-    download_voice(voice, voices)
-
-
 def fetch_bgtts(models):
     from huggingface_hub import snapshot_download
 
-    if (models / BGTTS / "checkpoint_inference.pt").exists() and (models / BGTTS / "tokenizer.py").exists():
+    have = [models / BGTTS / name for name in ("checkpoint_inference.pt", "tokenizer.py",
+                                                "samples/sample_female_bg1.wav", "samples/sample_female_en1.wav")]
+    if all(path.exists() for path in have):
         say(f"  BgTTS is already there ({BGTTS})")
     else:
-        say(f"  Downloading Tomo's Bulgarian voice ({BGTTS}, about 160 MB)…")
+        say(f"  Downloading Tomo's voice ({BGTTS}, about 165 MB)…")
         snapshot_download(BGTTS_REPO, revision=BGTTS_REVISION, local_dir=str(models / BGTTS), allow_patterns=BGTTS_FILES)
     if (models / CODEC / "model.safetensors").exists() and (models / CODEC / "config.yaml").exists():
         say(f"  MioCodec is already there ({CODEC})")
@@ -128,8 +118,6 @@ def fetch_bgtts(models):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--data-dir", type=Path, default=None, help="Tomo's data folder")
-    parser.add_argument("--voice-male", default=os.environ.get("TOMO_TTS_VOICE_MALE") or DEFAULT_VOICE_MALE)
-    parser.add_argument("--voice-female", default=os.environ.get("TOMO_TTS_VOICE_FEMALE") or DEFAULT_VOICE_FEMALE)
     args = parser.parse_args()
     data = args.data_dir or data_dir()
     models = data / "models"
@@ -140,8 +128,6 @@ def main():
         lambda: fetch_vosk(models),
         lambda: fetch_stt(models),
         lambda: fetch_pose(models),
-        lambda: fetch_voice(data / "voices", args.voice_male),
-        lambda: fetch_voice(data / "voices", args.voice_female),
         lambda: fetch_bgtts(models),
     )
     for step in steps:

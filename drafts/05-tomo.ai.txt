@@ -165,7 +165,7 @@ window_state, hide, click_at, type_text, set_volume, look_at_screen,
 find_on_screen (+ toggle_system в Linux). hide(on) скрива персонажа встрани
 (или го връща) и
 се помни (snapshot „hidden“). set_voice(voice: male|female) дава глас на показания персонаж;
-описанието му назовава гласовете (Alan и bgtts-male, Cori и bgtts-female).
+описанието му назовава гласовете (bgtts-male-en и bgtts-male, bgtts-female-en и bgtts-female).
 
 3. ОСНОВНИ ЕЛЕМЕНТИ
   AiClient(cfg, db, executor, catalog, control_allowed, http=None,

@@ -49,7 +49,7 @@ import numpy as np
 RATE = 16000
 CHUNK = RATE // 4  # samples per read: 0.25 s
 # Speech recognition threads: enough for a request in a fraction of a second,
-# while leaving the rest of the CPU to Piper and the model.
+# while leaving the rest of the CPU to the voice and the model.
 STT_THREADS = 4
 # Audio kept from before the wake phrase was spotted, so Parakeet hears all of it.
 PRE_ROLL_CHUNKS = 10  # 2.5 s

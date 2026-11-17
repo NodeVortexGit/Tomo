@@ -1,12 +1,13 @@
 """Speech out, on this computer: Tomo's replies become a voice.
 
-Two helpers, started once and kept running, each load their voices once and
-then turn each line they're sent into a WAV file: ``scripts/tts_piper.py``
-(Piper) for English and ``scripts/tts_bgtts.py`` (BgTTS-38M-V2) for Bulgarian.
-:meth:`Speech.voice_for` picks the voice by the reply's language and by the
-showing character: Alan or the BgTTS male voice for a male character, Cori or
-the BgTTS female voice for a female one (the model chooses which a character
-is: see characters.py). Playback uses what the system has: Windows' own sound player, PipeWire /
+One helper, ``scripts/tts_bgtts.py`` (BgTTS-38M-V2), started once and kept
+running, loads all four voices once and then turns each line it's sent into
+a WAV file. :meth:`Speech.voice_for` picks the voice by the reply's language
+and by the showing character: the male voice, in English or in Bulgarian,
+for a male character, the female one for a female character (the model
+chooses which a character is: see characters.py). The voices are cloned from
+the model's own English and Bulgarian samples. BgTTS can't read digits, so
+numbers become words first, in the reply's language. Playback uses what the system has: Windows' own sound player, PipeWire /
 PulseAudio / ALSA players on Linux, ``afplay`` on macOS. (Speech *in* is the
 listener in wake.py.)
 """
@@ -29,8 +30,7 @@ from .language import Language
 log = logging.getLogger(__name__)
 
 START_TIMEOUT = 180.0  # loading a voice the first time can mean downloading it
-SPEAK_TIMEOUT = 60.0
-BG_SPEAK_TIMEOUT = 180.0  # BgTTS takes about a third of the time the speech lasts, more while the model thinks
+SPEAK_TIMEOUT = 180.0  # BgTTS takes about a third of the time the speech lasts, more while the model thinks
 
 
 class Helper:
@@ -103,22 +103,19 @@ class Speech:
         self.voice_bg_female = cfg.tts_voice_bg_female
         # The showing character's voice, "male" or "female" (characters.voice_of).
         self.gender = gender or (lambda: "")
-        self.speed = cfg.tts_speed
         # All the voices at once: switching characters, or languages, never
         # waits for a voice to load.
-        self.piper = Helper(self.python, cfg.scripts_dir / "tts_piper.py",
-                            ["--voice", self.voice_female, "--voice", self.voice_male,
-                             "--voices-dir", str(cfg.data_dir / "voices")], SPEAK_TIMEOUT)
+        voices = (self.voice_female, self.voice_male, self.voice_bg_female, self.voice_bg_male)
         self.bgtts = Helper(self.python, cfg.scripts_dir / "tts_bgtts.py",
-                            ["--voice", self.voice_bg_female, "--voice", self.voice_bg_male,
-                             "--models-dir", str(cfg.data_dir / "models")], BG_SPEAK_TIMEOUT)
+                            [*(arg for v in voices for arg in ("--voice", v)),
+                             "--models-dir", str(cfg.data_dir / "models")], SPEAK_TIMEOUT)
         self._count = itertools.count()
         self._told_broken = False
 
     def voice_for(self, text: str) -> str:
-        """The voice for a line, by its language and the character: male
-        (BgTTS or Alan) if the character's male, otherwise female (BgTTS or
-        Cori), also while its voice isn't chosen yet."""
+        """The voice for a line, by its language and the character: the male
+        one if the character's male, otherwise the female one (also while its
+        voice isn't chosen yet)."""
         if Language.of(text) == Language.BULGARIAN:
             if self.gender() == "male":
                 return self.voice_bg_male
@@ -130,9 +127,9 @@ class Speech:
             return self.voice_female
 
     async def warm_up(self) -> None:
-        """Start the helpers now, as Tomo appears: loading the voices takes
+        """Start the helper now, as Tomo appears: loading the voices takes
         a few seconds, which the first reply would otherwise wait for."""
-        await asyncio.gather(self.piper.warm_up(), self.bgtts.warm_up())
+        await self.bgtts.warm_up()
 
     async def synthesize(self, text: str) -> Path:
         """Turn ``text`` into a WAV file for :meth:`play`. Markdown and emoji
@@ -142,11 +139,9 @@ class Speech:
             raise RuntimeError("nothing to say out loud")
         out = self.cache_dir / f"speech-{next(self._count)}.wav"
         voice = self.voice_for(text)
-        if voice in (self.voice_bg_male, self.voice_bg_female):
-            # BgTTS has no speed setting.
-            await self.bgtts.ask({"text": numbers_in_bulgarian(text), "out": str(out), "voice": voice})
-        else:
-            await self.piper.ask({"text": text, "out": str(out), "speed": self.speed, "voice": voice})
+        bulgarian = voice in (self.voice_bg_male, self.voice_bg_female)
+        said = numbers_in_bulgarian(text) if bulgarian else numbers_in_english(text)
+        await self.bgtts.ask({"text": said, "out": str(out), "voice": voice})
         return out
 
     async def play(self, audio: Path) -> None:
@@ -323,3 +318,68 @@ def _as_number(digits: str, noun: str = "") -> str:
     if len(digits) > 9 or (len(digits) > 1 and digits.startswith("0")):
         return " ".join(UNITS[int(d)] for d in digits)
     return number_words(int(digits), noun)
+
+
+EN_ONES = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
+           "seventeen eighteen nineteen").split()
+EN_TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
+EN_NUMBER = re.compile(r"(?<![\w.,:])(\d{1,2}):(\d{2})(?!\d)"
+                       r"|(?<![\w.,:])(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+)(?![.,]?\d))?(st|nd|rd|th)?(?!\w)(\s*%)?")
+
+
+def english_words(n: int) -> str:
+    """A whole number below a billion, in English words."""
+    if n >= 1_000_000:
+        rest = n % 1_000_000
+        return f"{english_words(n // 1_000_000)} million" + (f" {english_words(rest)}" if rest else "")
+    if n >= 1000:
+        rest = n % 1000
+        return f"{english_words(n // 1000)} thousand" + (f" {english_words(rest)}" if rest else "")
+    if n >= 100:
+        rest = n % 100
+        return f"{EN_ONES[n // 100]} hundred" + (f" {english_words(rest)}" if rest else "")
+    if n >= 20:
+        return EN_TENS[n // 10] + (f"-{EN_ONES[n % 10]}" if n % 10 else "")
+    return EN_ONES[n]
+
+
+def ordinal(words: str) -> str:
+    """"twenty-one" → "twenty-first"."""
+    special = {"one": "first", "two": "second", "three": "third", "five": "fifth", "eight": "eighth",
+               "nine": "ninth", "twelve": "twelfth"}
+    head, last = re.match(r"(.*?)([a-z]+)$", words).groups()
+    if last in special:
+        return head + special[last]
+    return head + (last[:-1] + "ieth" if last.endswith("y") else last + "th")
+
+
+def numbers_in_english(text: str) -> str:
+    """Digits as English words, as numbers_in_bulgarian does for Bulgarian:
+    40% → forty percent, 15:30 → fifteen thirty, 3.5 → three point five,
+    2nd → second, 1,250 → one thousand two hundred fifty."""
+
+    def spoken(match: re.Match) -> str:
+        hours, minutes, whole, part, suffix, percent = match.groups()
+        if hours is not None:
+            hour = english_words(int(hours))
+            if minutes == "00":
+                return f"{hour} o'clock"
+            if minutes.startswith("0"):
+                return f"{hour} oh {EN_ONES[int(minutes[1])]}"
+            return f"{hour} {english_words(int(minutes))}"
+        said = _as_english(whole.replace(",", ""))
+        if suffix and part is None:
+            said = ordinal(said)
+        if part is not None:
+            said += " point " + " ".join(EN_ONES[int(d)] for d in part)
+        return said + (" percent" if percent else "")
+
+    # Whatever's left: v2, the parts of a date.
+    text = re.sub(r"\d+", lambda m: f" {_as_english(m.group())} ", EN_NUMBER.sub(spoken, text))
+    return re.sub(r" +([.,!?;:)])", r"\1", re.sub(r" {2,}", " ", text)).strip()
+
+
+def _as_english(digits: str) -> str:
+    if len(digits) > 9 or (len(digits) > 1 and digits.startswith("0")):
+        return " ".join(EN_ONES[int(d)] for d in digits)
+    return english_words(int(digits))

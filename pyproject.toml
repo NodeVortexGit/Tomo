@@ -21,8 +21,8 @@ dependencies = [
 [project.optional-dependencies]
 # The helpers in scripts/ run with the same Python, so the installers add these.
 speech = [
-    "piper-tts>=1.3",                            # Tomo's English voice (tts_piper.py)…
-    # …and Bulgarian (tts_bgtts.py). The installers keep torch to its CPU build.
+    # Tomo's voice, English and Bulgarian (tts_bgtts.py). The installers keep
+    # torch to its CPU build.
     "torch>=2.6",
     "torchaudio>=2.6",
     "soundfile>=0.12",

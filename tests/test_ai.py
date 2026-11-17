@@ -324,21 +324,21 @@ def test_the_persona_knows_the_computer_the_character_and_its_voice(tmp_path):
     assert "send you images" in prompt and "You appear as" not in prompt
     ai_client.db.add_character("Kiyotaka", str(tmp_path / "k.vrm"))
     ai_client.db.set_active_character("Kiyotaka")
-    assert "“Kiyotaka”; your English voice is female (en_GB-cori-medium)" in ai_client.system_prompt(Language.ENGLISH)
+    assert "“Kiyotaka”; your voice is female" in ai_client.system_prompt(Language.ENGLISH)
     characters.set_voice(ai_client.db, "male")
-    assert "your English voice is male (en_GB-alan-medium)" in ai_client.system_prompt(Language.ENGLISH)
+    assert "your voice is male" in ai_client.system_prompt(Language.ENGLISH)
 
 
-def test_set_voice_offers_the_piper_voices_and_gives_the_character_one(tmp_path):
+def test_set_voice_offers_the_voices_and_gives_the_character_one(tmp_path):
     spec = next(t for t in tool_specs(False) if t["function"]["name"] == "set_voice")["function"]
     assert spec["parameters"]["properties"]["voice"]["enum"] == ["male", "female"]
-    assert all(v in spec["description"] for v in ("en_GB-alan-medium", "en_GB-cori-medium", "bgtts-male", "bgtts-female"))
+    assert all(v in spec["description"] for v in ("bgtts-male-en", "bgtts-female-en", "bgtts-male", "bgtts-female"))
     ai_client = client(tmp_path, FakeServer([]))
     set_voice = lambda voice: asyncio.run(ai_client.dispatch_tool("set_voice", {"voice": voice}, []))  # noqa: E731
     assert "no character" in set_voice("male")
     ai_client.db.add_character("Ayako", str(tmp_path / "a.vrm"))
     ai_client.db.set_active_character("Ayako")
-    assert set_voice("male") == "Ayako now speaks in the male voice: en_GB-alan-medium in English, bgtts-male in Bulgarian"
+    assert set_voice("male") == "Ayako now speaks in the male voice: bgtts-male-en in English, bgtts-male in Bulgarian"
     assert characters.voice_of(ai_client.db) == "male"
     assert set_voice("robot") == "the voice must be male or female"
 
@@ -400,7 +400,7 @@ def test_the_model_chooses_a_new_characters_voice_from_its_picture(tmp_path):
     assert [t["function"]["name"] for t in asked["tools"]] == ["set_voice"]
     assert len(asked["messages"][-1]["images"]) == 1, "it's shown the character's picture"
     assert "“Kiyotaka”" in asked["messages"][-1]["content"] and "Kalata" in asked["messages"][-1]["content"]
-    assert shown[0].line.text == "Kiyotaka speaks English in a male voice (en_GB-alan-medium)"
+    assert shown[0].line.text == "Kiyotaka speaks in a male voice"
     # Known now: not asked again.
     assert asyncio.run(ai_client.ensure_voice("Kiyotaka", vrm, shown.append)) == "male"
     assert len(server.seen) == 1

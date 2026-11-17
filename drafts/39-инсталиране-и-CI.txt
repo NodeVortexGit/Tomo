@@ -8,7 +8,7 @@
   Основни (мозък + тяло): httpx, python-dotenv, chromadb, numpy, pillow,
     glfw, moderngl, imgui-bundle.
   Допълнения:
-    speech — piper-tts, torch, torchaudio, soundfile, miocodec (от GitHub, на
+    speech — torch, torchaudio, soundfile, miocodec (от GitHub, на
              фиксиран commit), vosk, onnx-asr[cpu,hub], sounddevice (без Linux);
              инсталаторите слагат torch за процесора (--no-sources
              --torch-backend cpu);

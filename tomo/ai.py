@@ -346,8 +346,7 @@ class AiClient:
         character = self.db.active_character()
         if character is not None:
             voice = character.voice if character.voice in characters.VOICES else "female"
-            piper = self.cfg.tts_voice_male if voice == "male" else self.cfg.tts_voice_female
-            ctx += f"\nYou appear as the 3D character “{character.name}”; your English voice is {voice} ({piper}).\n"
+            ctx += f"\nYou appear as the 3D character “{character.name}”; your voice is {voice}.\n"
         shell = platform.shell_name()
         shell_hint = (" It's Windows PowerShell 5.1: use built-in cmdlets (Get-CimInstance, not wmic)."
                       if platform.WINDOWS else "")
@@ -536,8 +535,7 @@ class AiClient:
         finally:
             self._choosing.discard(name)
         if voice is not None and ui is not None:
-            piper = self.cfg.tts_voice_male if voice == "male" else self.cfg.tts_voice_female
-            ui(Chat(ChatLine(Role.SYSTEM, f"{name} speaks English in a {voice} voice ({piper})")))
+            ui(Chat(ChatLine(Role.SYSTEM, f"{name} speaks in a {voice} voice")))
         return voice
 
     async def choose_voice(self, name: str, path: Path) -> str | None:
@@ -1237,8 +1235,8 @@ def tool_specs(allow_screen: bool,
                                                     DEFAULT_VOICE_BG_MALE, DEFAULT_VOICE_BG_FEMALE)
                ) -> list[dict]:
     """The tools, in the function format both APIs share. Kept short: the
-    model reads all of this every turn. ``voices``: the Piper voices, male,
-    female and Bulgarian, which set_voice chooses between."""
+    model reads all of this every turn. ``voices``: the voices, male and
+    female in English and in Bulgarian, which set_voice chooses between."""
 
     def function(name: str, description: str, properties: dict, required: list[str]) -> dict:
         return {"type": "function", "function": {"name": name, "description": description, "parameters": {
