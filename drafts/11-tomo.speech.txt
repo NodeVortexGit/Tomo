@@ -8,28 +8,37 @@ Tomo говори. Гласът се избира с обикновено if/eli
   if   отговорът е на български
       if персонажът е мъжки      → bgtts-male          (BgTTS-38M-V2)
       else (женски или неизбран) → bgtts-female        (BgTTS-38M-V2)
-  elif персонажът е мъжки        → bgtts-male-en       (BgTTS-38M-V2)
-  else (женски или неизбран)     → bgtts-female-en     (BgTTS-38M-V2)
+  elif персонажът е мъжки        → en_GB-alan-medium   (Alan, Piper)
+  else (женски или неизбран)     → en_GB-cori-medium   (Cori, Piper)
 Дали персонажът е мъжки или женски решава моделът (виж 14-tomo.characters
 и 05-tomo.ai: ensure_voice, set_voice); Speech го пита чрез функцията
 gender, която мозъкът му подава (characters.voice_of).
 
 2. КАК РАБОТИ
-Четирите гласа работят в един помощен процес (Helper), scripts/tts_bgtts.py,
-пуснат веднъж — още при стартиране (warm_up), за да не чака първият отговор:
-TOMO_TTS_VOICE_FEMALE, TOMO_TTS_VOICE_MALE (английски) и
-TOMO_TTS_VOICE_BG_FEMALE, TOMO_TTS_VOICE_BG_MALE (български). Той ги зарежда и
-за всеки ред JSON {"text", "out", "voice"} пише WAV файл и отговаря
-{"ok": true}. Гласът, зададен в по-стар .env като глас на Piper
-(en_GB-alan-medium…), отстъпва на подразбиращия се (config.bgtts_voice).
-BgTTS няма звук за цифри, затова преди това те стават думи на езика на
-отговора: numbers_in_bulgarian() — 40% → четиридесет процента, 2 часа → два
-часа, 15:30 → петнадесет и тридесет, 007 → нула нула седем;
-numbers_in_english() — 40% → forty percent, 15:30 → fifteen thirty,
-9:05 → nine oh five, 2nd → second, 3.5 → three point five. Възпроизвеждане: winsound в Windows;
+Гласовете работят в два помощни процеса (Helper), пуснати веднъж — още при
+стартиране (warm_up), за да не чака първият отговор: scripts/tts_piper.py
+(TOMO_TTS_VOICE_FEMALE, TOMO_TTS_VOICE_MALE) и scripts/tts_bgtts.py
+(TOMO_TTS_VOICE_BG_FEMALE, TOMO_TTS_VOICE_BG_MALE). Всеки зарежда гласовете си
+и за всеки ред JSON {"text", "out", "voice"} (за Piper и "speed") пише WAV файл
+и отговаря {"ok": true}. Единият може да не работи, без това да пречи на
+другия.
+numbers_in_bulgarian() прави цифрите на думи, преди текстът да стигне до BgTTS
+(той няма звук за тях): 40% → четиридесет процента, 2 часа → два часа, 15:30 →
+петнадесет и тридесет, 007 → нула нула седем. Възпроизвеждане: winsound в Windows;
 първият наличен от pw-play, paplay, aplay, mpv, ffplay в Linux; afplay в
 macOS. След края файлът
 се трие.
+Отговорът се чете, докато се пише (SpeechStream): speech_ends() намира
+края на всяко завършено изречение (последвано от интервал — „3.5“ и
+недописано изречение не са край) или нов ред, а при дълго парче — запетая
+(първото парче след 10 думи, следващите след 25). Гласът е този за първото
+парче, за целия отговор. Парчетата се правят поред, докато предишното
+звучи, а Player ги пуска едно след друго без пауза: в Windows през един
+поток на sounddevice, който остава отворен; другаде — файл по файл
+(play_wav). Нов отговор спира гласа на предишния (Speech.stream).
+heard(tag, seconds) — когато всяко парче започне да звучи (и колко трае):
+brain.LiveReply пуска тогава думите му на екрана (RevealTo), така че текстът
+върви заедно с гласа; парче, което не е станало — seconds 0, веднага.
 speakable() подготвя текста за четене на глас: маха Markdown маркерите,
 връзките оставят само думите си, емоджитата отпадат, всеки ред от списък
 получава пауза (точка).
@@ -45,9 +54,9 @@ speakable() подготвя текста за четене на глас: ма�
   speakable, link_words, is_emoji, play_wav, numbers_in_bulgarian, number_words
 
 4. ВРЪЗКИ
-Използва: platform (helper_python, quiet_flags), language,
+Използва: platform (helper_python, quiet_flags), language, scripts/tts_piper.py,
 scripts/tts_bgtts.py.
-Използва се от: brain (отговорите), health (броенето на глас), ask (--speak).
+Използва се от: brain (отговорите — LiveReply), health (броенето на глас), ask (--speak).
 
 5. ТЕСТОВЕ
 tests/test_basics.py — Markdown, емоджита, връзки, списъци, изборът на глас

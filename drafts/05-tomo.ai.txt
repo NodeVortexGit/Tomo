@@ -157,6 +157,14 @@ change_character. Проверено с истинския модел: 6 от 6 
     JSON), се разпознават (calls_in_text); <think> бележките се махат
     (without_thinking);
   - модел, който не приема изображения, получава заявката отново без тях.
+Поточно (с on_text): заявката е със "stream": true (редове JSON от Ollama,
+събития "data: …" от LM Studio; сървър, който все пак отговаря наведнъж, се
+чете наведнъж). Текстът дотук отива към on_text, докато може да се покаже
+(streamable — не и докато в него има „<“, „{“ или ```, т.е. може да е
+извикване на инструмент или <think>), заедно с това дали вече може да се
+чете на глас: не, докато само обещава (only_promises), нито докато всички
+действия досега са се провалили (проверката за успех може да го върне). Опит,
+който завършва с инструменти или се връща, се оттегля: on_text("", False).
 
 Изпълнение на инструментите (dispatch_tool): виж Приложение А в docs/archive.md —
 execute_command, remember, set_preference, recall, walk_to, express,
@@ -165,7 +173,7 @@ window_state, hide, click_at, type_text, set_volume, look_at_screen,
 find_on_screen (+ toggle_system в Linux). hide(on) скрива персонажа встрани
 (или го връща) и
 се помни (snapshot „hidden“). set_voice(voice: male|female) дава глас на показания персонаж;
-описанието му назовава гласовете (bgtts-male-en и bgtts-male, bgtts-female-en и bgtts-female).
+описанието му назовава гласовете (Alan и bgtts-male, Cori и bgtts-female).
 
 3. ОСНОВНИ ЕЛЕМЕНТИ
   AiClient(cfg, db, executor, catalog, control_allowed, http=None,
