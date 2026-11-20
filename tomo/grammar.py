@@ -322,15 +322,18 @@ def features(toks: list[str], lexicon: Lexicon | None) -> tuple[np.ndarray, np.n
 class Tagger:
     """The trained network, run with numpy: letters → a vector per token
     (a convolution over its letters) → two bidirectional GRU layers over
-    the sentence → a label per token."""
+    the sentence → a score per label per token. Like a classifier that
+    may only answer from the options it's given, a word's probabilities are
+    over its own choices: keep it, or one of its forms (:func:`choices`)."""
 
     def __init__(self, path: Path) -> None:
         with np.load(path, allow_pickle=False) as data:
             self.w = {k: data[k].astype(np.float32) for k in data.files if k != "labels"}
             self.labels = [str(x) for x in data["labels"]]
+        self.label_id = {label: i for i, label in enumerate(self.labels)}
 
     def __call__(self, chars: np.ndarray, flags: np.ndarray) -> np.ndarray:
-        """Each token's probabilities over ``labels``."""
+        """Each token's scores (logits) for ``labels``."""
         w = self.w
         x = w["embed"][chars]  # (T, C, E)
         kernel = w["conv.w"]  # (out, E, k)
@@ -346,10 +349,31 @@ class Tagger:
             bwd = _gru(h[::-1], w[f"gru{layer}.b.wi"], w[f"gru{layer}.b.wh"], w[f"gru{layer}.b.bi"],
                        w[f"gru{layer}.b.bh"])[::-1]
             h = np.concatenate([fwd, bwd], axis=1)
-        logits = h @ w["out.w"].T + w["out.b"]
-        logits -= logits.max(axis=1, keepdims=True)
-        p = np.exp(logits)
-        return p / p.sum(axis=1, keepdims=True)
+        return h @ w["out.w"].T + w["out.b"]
+
+
+def choices(word: str, lexicon: Lexicon | None, label_id: dict[str, int]) -> list[int]:
+    """The labels open to ``word``: keep it; for a word the dictionary
+    doesn't know, SPELL; for one it knows, the ending changes into its
+    other forms ("компютъра": "компютър", "компютърът", "компютри"…)."""
+    allowed = [label_id[KEEP]]
+    if lexicon is None or not WORD.fullmatch(word):
+        return allowed
+    if not lexicon.known(word):
+        return allowed + ([label_id[SPELL]] if SPELL in label_id else [])
+    lower = word.lower()
+    for form in lexicon.forms(lower):
+        label = ending_change(lower, form)
+        if label is not None and label != KEEP and label in label_id:
+            allowed.append(label_id[label])
+    return sorted(set(allowed))
+
+
+def softmax_over(logits: np.ndarray, allowed: list[int]) -> np.ndarray:
+    """Probabilities over ``allowed`` only (in that order)."""
+    z = logits[allowed] - logits[allowed].max()
+    e = np.exp(z)
+    return e / e.sum()
 
 
 def _gru(x: np.ndarray, wi: np.ndarray, wh: np.ndarray, bi: np.ndarray, bh: np.ndarray) -> np.ndarray:
@@ -419,20 +443,20 @@ class Proofreader:
             toks = tokens(text[start:end])
             if not toks:
                 continue
-            probs = None
+            logits = None
             if self._tagger is not None:
                 chars, flags = features([t for _, _, t in toks], lexicon)
-                probs = self._tagger(chars, flags)
+                logits = self._tagger(chars, flags)
             for i, (s, e, word) in enumerate(toks):
                 if not CYRILLIC.search(word):
                     continue
-                issue = self._word(word, start + s, start + e, lexicon, probs[i] if probs is not None else None,
+                issue = self._word(word, start + s, start + e, lexicon, logits[i] if logits is not None else None,
                                    first=i == 0)
                 if issue is not None:
                     issues.append(issue)
         return issues
 
-    def _word(self, word: str, start: int, end: int, lexicon: Lexicon | None, probs: np.ndarray | None,
+    def _word(self, word: str, start: int, end: int, lexicon: Lexicon | None, logits: np.ndarray | None,
               first: bool) -> Issue | None:
         russian = RUSSIAN.get(word.lower())
         if russian is not None and (lexicon is None or not lexicon.known(word)):
@@ -444,17 +468,18 @@ class Proofreader:
                 return None
             fix, sure = spelling_fix(word, lexicon)
             return Issue(start, end, word, fix, sure, "spelling") if fix and sure >= NOTE else None
-        if probs is None:
+        if logits is None or self._tagger is None:
             return None
+        allowed = choices(word, lexicon, self._tagger.label_id)
+        if len(allowed) < 2:
+            return None
+        probs = softmax_over(logits, allowed)
         best = int(np.argmax(probs))
-        label = self._tagger.labels[best] if self._tagger else KEEP
+        label = self._tagger.labels[allowed[best]]
         if label in (KEEP, SPELL) or probs[best] < NOTE:
             return None
         fixed = apply_change(word, label)
-        # Only a change into another form of the same word, which exists.
         if fixed is None or fixed == word:
-            return None
-        if lexicon is not None and (not lexicon.known(fixed) or fixed.lower() not in lexicon.forms(word.lower())):
             return None
         return Issue(start, end, word, fixed, float(probs[best]), "grammar")
 

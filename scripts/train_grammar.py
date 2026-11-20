@@ -2,8 +2,10 @@
 """Train the grammar tagger Tomo proofreads its Bulgarian with (tomo/grammar.py).
 
 The tagger reads a sentence and says, for each word, "keep it" or "change its
-ending" ("-а" → "-ът"). It learns from correct Bulgarian that this script
-spoils on purpose, the way a model writing Bulgarian does:
+ending" ("-а" → "-ът") — choosing only among the word's own forms in the
+dictionary, in training as when it runs (grammar.choices). It learns from
+correct Bulgarian that this script spoils on purpose, the way a model
+writing Bulgarian does:
 
   - another form of the same word: the short article for the full one
     ("компютъра работи"), an adjective that doesn't agree ("хубав книга"),
@@ -49,8 +51,10 @@ MIN_LABEL_COUNT = 30
 CLEAN = 0.3  # left as they are
 SPELLING = 0.15  # of the spoiled words: misspelled
 LETTERS = "абвгдежзийклмнопрстуфхцчшщъьюя"
-# Full ↔ short article: the mistake models make most.
+# Full ↔ short article: the mistake models make most — planted first in
+# this share of the spoiled sentences that have one.
 ARTICLE = [("ът", "а"), ("ят", "я"), ("а", "ът"), ("я", "ят")]
+ARTICLE_FIRST = 0.35
 
 _lexicon: Lexicon | None = None
 ASSETS = Path(__file__).resolve().parent.parent / "assets" / "grammar"
@@ -97,6 +101,8 @@ def subtitle_sentences(path: Path, limit: int, seed: int) -> list[str]:
                 continue
             seen.add(s)
             out.append(s)
+            if len(out) >= limit * 2:  # enough to choose from
+                break
     random.Random(seed).shuffle(out)
     return out[:limit]
 
@@ -122,6 +128,14 @@ def spoil(sentence: str, rng: random.Random) -> tuple[list[str], list[str]]:
     words = [i for i, t in enumerate(toks) if WORD.fullmatch(t) and len(t) > 1
              and (t.islower() or (i == 0 and t[1:].islower()))]
     rng.shuffle(words)
+    if rng.random() < ARTICLE_FIRST:
+        swappable = [i for i in words if article_swap(toks[i].lower()) is not None]
+        if swappable:
+            i = swappable[0]
+            capital = toks[i][:1].isupper()
+            right = toks[i].lower()
+            toks[i], labels[i] = _capital(article_swap(right), capital), grammar.ending_change(article_swap(right), right)
+            words.remove(i)
     for i in words[: rng.choice((1, 1, 1, 2, 2, 3))]:
         capital = toks[i][:1].isupper()
         right = toks[i].lower()
@@ -142,6 +156,16 @@ def spoil(sentence: str, rng: random.Random) -> tuple[list[str], list[str]]:
 
 def _capital(word: str, capital: bool) -> str:
     return word[:1].upper() + word[1:] if capital else word
+
+
+def article_swap(word: str) -> str | None:
+    """A masculine noun with the other article ("столът" ↔ "стола")."""
+    for full, short in ARTICLE:
+        if word.endswith(full) and len(word) > len(full) + 2:
+            swapped = word[: -len(full)] + short
+            if swapped in _lexicon.forms(word) and (full in ("ът", "ят") or swapped.endswith(("ът", "ят"))):
+                return swapped
+    return None
 
 
 def other_form(word: str, rng: random.Random) -> str | None:
@@ -181,7 +205,19 @@ def encode(args: tuple[str, int]) -> tuple[np.ndarray, np.ndarray, list[str]] | 
     if not toks:
         return None
     chars, flags = grammar.features(toks, _lexicon)
-    return chars.astype(np.int16), flags.astype(np.int8), labels
+    return chars.astype(np.int16), flags.astype(np.int8), labels, toks
+
+
+_label_id: dict[str, int] = {}
+
+
+def init_choices(folder: str, label_id: dict[str, int]) -> None:
+    init_worker(folder)
+    _label_id.update(label_id)
+
+
+def word_choices(word: str) -> np.ndarray:
+    return np.array(grammar.choices(word, _lexicon, _label_id), dtype=np.int16)
 
 
 # ---- pairs of wrong and right sentences (the test) ---------------------------------------
@@ -270,22 +306,35 @@ def batches(items, size: int, rng: random.Random):
         yield from group
 
 
-def collate(items, idx, label_id):
+def collate(items, idx, label_id, allowed):
+    """A batch: letters, flags, the labels, and which labels each token may
+    take (its own forms: the rest are masked out)."""
     import torch
 
     t = max(len(items[i][0]) for i in idx)
     chars = np.zeros((len(idx), t, grammar.MAX_CHARS), dtype=np.int64)
     flags = np.zeros((len(idx), t, 2), dtype=np.float32)
     y = np.full((len(idx), t), IGNORE, dtype=np.int64)
+    mask = np.zeros((len(idx), t, len(label_id)), dtype=bool)
+    mask[:, :, label_id[KEEP]] = True
     for row, i in enumerate(idx):
-        c, f, labels = items[i]
+        c, f, labels, toks = items[i]
         chars[row, : len(c)] = c
         flags[row, : len(f)] = f
-        y[row, : len(labels)] = [label_id.get(lab, IGNORE) for lab in labels]
-    return torch.from_numpy(chars), torch.from_numpy(flags), torch.from_numpy(y)
+        for j, (lab, tok) in enumerate(zip(labels, toks)):
+            ok = allowed.get(tok)
+            if ok is not None:
+                mask[row, j, ok] = True
+            gold = label_id.get(lab, IGNORE)
+            y[row, j] = gold if gold != IGNORE and mask[row, j, gold] else IGNORE
+    return torch.from_numpy(chars), torch.from_numpy(flags), torch.from_numpy(y), torch.from_numpy(mask)
 
 
-def evaluate(model, items, label_id, labels):
+def masked(logits, mask):
+    return logits.masked_fill(~mask, -1e4)
+
+
+def evaluate(model, items, label_id, labels, allowed):
     """Over tokens: how many changes it finds (recall), how often a change it
     suggests is right (precision), how often it changes a correct word."""
     import torch
@@ -295,8 +344,8 @@ def evaluate(model, items, label_id, labels):
     with torch.no_grad():
         for start in range(0, len(items), 256):
             idx = list(range(start, min(start + 256, len(items))))
-            chars, flags, y = collate(items, idx, label_id)
-            p = torch.softmax(model(chars, flags), -1)
+            chars, flags, y, mask = collate(items, idx, label_id, allowed)
+            p = torch.softmax(masked(model(chars, flags), mask), -1)
             conf, pred = p.max(-1)
             for row, i in enumerate(idx):
                 for j, gold in enumerate(items[i][2]):
@@ -333,6 +382,7 @@ def main() -> None:
     torch.manual_seed(args.seed)
     rng = random.Random(args.seed)
     init_worker(str(ASSETS))
+    assert grammar.choices("стола", _lexicon, {KEEP: 0, "ENDING:а>ът": 1}) == [0, 1]
 
     t0 = time.time()
     parquet = next(args.data.glob("*.parquet"))
@@ -357,7 +407,7 @@ def main() -> None:
                                       chunksize=500) if x is not None]
     print(f"spoiled and encoded in {time.time() - t0:.0f}s", flush=True)
 
-    counts = collections.Counter(lab for _, _, labels in items for lab in labels)
+    counts = collections.Counter(lab for _, _, labels, _ in items for lab in labels)
     labels = [KEEP, SPELL] + sorted((lab for lab, n in counts.items()
                                      if lab not in (KEEP, SPELL) and n >= MIN_LABEL_COUNT), key=lambda x: -counts[x])
     label_id = {lab: i for i, lab in enumerate(labels)}
@@ -371,7 +421,12 @@ def main() -> None:
         if got is not None:
             toks, labs = got
             c, f = grammar.features(toks, _lexicon)
-            tests[kind].append((c, f, labs))
+            tests[kind].append((c, f, labs, toks))
+    # Each distinct token's choices, once.
+    distinct = sorted({tok for group in (items, *tests.values()) for _, _, _, toks in group for tok in toks})
+    with multiprocessing.Pool(4, init_choices, (str(ASSETS), label_id)) as pool:
+        allowed = dict(zip(distinct, pool.map(word_choices, distinct, chunksize=2000)))
+    print(f"choices for {len(allowed)} distinct tokens in {time.time() - t0:.0f}s", flush=True)
 
     model = build_model(len(labels), args.embed, args.conv, args.hidden)
     print(f"{sum(p.numel() for p in model.parameters()):,} weights", flush=True)
@@ -382,8 +437,8 @@ def main() -> None:
     step = 0
     for epoch in range(args.epochs):
         for idx in batches(train, args.batch, rng):
-            chars, flags, y = collate(train, idx, label_id)
-            loss = loss_fn(model(chars, flags).flatten(0, 1), y.flatten())
+            chars, flags, y, mask = collate(train, idx, label_id, allowed)
+            loss = loss_fn(masked(model(chars, flags), mask).flatten(0, 1), y.flatten())
             opt.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -394,9 +449,9 @@ def main() -> None:
                 print(f"epoch {epoch} step {step}/{steps} loss {loss.item():.4f} {time.time() - t0:.0f}s", flush=True)
             if step % 5000 == 0:
                 export(model, labels, args.out)
-        print(f"epoch {epoch} dev {evaluate(model, dev, label_id, labels)}", flush=True)
+        print(f"epoch {epoch} dev {evaluate(model, dev, label_id, labels, allowed)}", flush=True)
         for kind, test in sorted(tests.items()):
-            print(f"  {kind:32} {evaluate(model, test, label_id, labels)}", flush=True)
+            print(f"  {kind:32} {evaluate(model, test, label_id, labels, allowed)}", flush=True)
         export(model, labels, args.out)
     print(f"saved {args.out} ({args.out.stat().st_size / 1e6:.1f} MB)")
 
