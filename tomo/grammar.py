@@ -328,8 +328,14 @@ class Tagger:
 
     def __init__(self, path: Path) -> None:
         with np.load(path, allow_pickle=False) as data:
-            self.w = {k: data[k].astype(np.float32) for k in data.files if k != "labels"}
+            self.w = {k: data[k].astype(np.float32) for k in data.files
+                      if k not in ("labels", "temperature", "sure", "note")}
             self.labels = [str(x) for x in data["labels"]]
+            # What makes its confidence honest (scripts/calibrate_grammar.py).
+            self.temperature = float(data["temperature"]) if "temperature" in data.files else 1.0
+            # From where its changes are right nine times in ten (sure), half (note).
+            self.sure = float(data["sure"]) if "sure" in data.files else SURE
+            self.note = float(data["note"]) if "note" in data.files else NOTE
         self.label_id = {label: i for i, label in enumerate(self.labels)}
 
     def __call__(self, chars: np.ndarray, flags: np.ndarray) -> np.ndarray:
@@ -349,7 +355,7 @@ class Tagger:
             bwd = _gru(h[::-1], w[f"gru{layer}.b.wi"], w[f"gru{layer}.b.wh"], w[f"gru{layer}.b.bi"],
                        w[f"gru{layer}.b.bh"])[::-1]
             h = np.concatenate([fwd, bwd], axis=1)
-        return h @ w["out.w"].T + w["out.b"]
+        return (h @ w["out.w"].T + w["out.b"]) / self.temperature
 
 
 def choices(word: str, lexicon: Lexicon | None, label_id: dict[str, int]) -> list[int]:
@@ -393,7 +399,7 @@ def _gru(x: np.ndarray, wi: np.ndarray, wh: np.ndarray, bi: np.ndarray, bh: np.n
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
-    return 1 / (1 + np.exp(-x))
+    return 1 / (1 + np.exp(-np.clip(x, -30, 30)))
 
 
 def dictionaries(folder: Path) -> list[Path]:
@@ -476,12 +482,17 @@ class Proofreader:
         probs = softmax_over(logits, allowed)
         best = int(np.argmax(probs))
         label = self._tagger.labels[allowed[best]]
-        if label in (KEEP, SPELL) or probs[best] < NOTE:
+        if label in (KEEP, SPELL) or probs[best] < self._tagger.note:
             return None
         fixed = apply_change(word, label)
         if fixed is None or fixed == word:
             return None
-        return Issue(start, end, word, fixed, float(probs[best]), "grammar")
+        # On the proofreader's one scale: at the tagger's own "sure", SURE.
+        sure = SURE + (float(probs[best]) - self._tagger.sure) * (1 - SURE) / max(1 - self._tagger.sure, 1e-6)
+        if probs[best] < self._tagger.sure:
+            sure = NOTE + (float(probs[best]) - self._tagger.note) * (SURE - NOTE) / max(
+                self._tagger.sure - self._tagger.note, 1e-6)
+        return Issue(start, end, word, fixed, min(max(sure, NOTE), 1.0), "grammar")
 
     def fix(self, text: str) -> tuple[str, list[Issue]]:
         """``text`` with the sure mistakes fixed, and the unsure ones left
