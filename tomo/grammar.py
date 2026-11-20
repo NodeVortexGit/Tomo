@@ -271,6 +271,17 @@ def ending_change(wrong: str, right: str) -> str | None:
     return f"ENDING:{cut}>{add}"
 
 
+# The full ↔ short article ("компютърът" ↔ "компютъра", "учителят" ↔
+# "учителя"): the changes the tagger is best at, so they have cut-offs of
+# their own.
+ARTICLE_CHANGES = frozenset({"ENDING:ът>а", "ENDING:а>ът", "ENDING:т>", "ENDING:>т"})
+KINDS = ("article", "other")
+
+
+def kind_of(label: str) -> str:
+    return "article" if label in ARTICLE_CHANGES else "other"
+
+
 def apply_change(word: str, label: str) -> str | None:
     """``word`` with the ending change ``label`` made; None if it doesn't fit."""
     if not label.startswith("ENDING:"):
@@ -328,14 +339,16 @@ class Tagger:
 
     def __init__(self, path: Path) -> None:
         with np.load(path, allow_pickle=False) as data:
-            self.w = {k: data[k].astype(np.float32) for k in data.files
-                      if k not in ("labels", "temperature", "sure", "note")}
+            settings = {"labels", "temperature"} | {f"{c}.{k}" for c in ("sure", "note") for k in KINDS}
+            self.w = {k: data[k].astype(np.float32) for k in data.files if k not in settings}
             self.labels = [str(x) for x in data["labels"]]
             # What makes its confidence honest (scripts/calibrate_grammar.py).
             self.temperature = float(data["temperature"]) if "temperature" in data.files else 1.0
-            # From where its changes are right nine times in ten (sure), half (note).
-            self.sure = float(data["sure"]) if "sure" in data.files else SURE
-            self.note = float(data["note"]) if "note" in data.files else NOTE
+            # For each kind of change, from where it's right nine times in
+            # ten (sure) and half the time (note); above 1 for a kind that never is.
+            self.cuts = {kind: (float(data[f"note.{kind}"]) if f"note.{kind}" in data.files else NOTE,
+                                float(data[f"sure.{kind}"]) if f"sure.{kind}" in data.files else SURE)
+                         for kind in KINDS}
         self.label_id = {label: i for i, label in enumerate(self.labels)}
 
     def __call__(self, chars: np.ndarray, flags: np.ndarray) -> np.ndarray:
@@ -482,17 +495,21 @@ class Proofreader:
         probs = softmax_over(logits, allowed)
         best = int(np.argmax(probs))
         label = self._tagger.labels[allowed[best]]
-        if label in (KEEP, SPELL) or probs[best] < self._tagger.note:
+        if label in (KEEP, SPELL):
+            return None
+        note, sure = self._tagger.cuts[kind_of(label)]
+        p = float(probs[best])
+        if p < note:
             return None
         fixed = apply_change(word, label)
         if fixed is None or fixed == word:
             return None
-        # On the proofreader's one scale: at the tagger's own "sure", SURE.
-        sure = SURE + (float(probs[best]) - self._tagger.sure) * (1 - SURE) / max(1 - self._tagger.sure, 1e-6)
-        if probs[best] < self._tagger.sure:
-            sure = NOTE + (float(probs[best]) - self._tagger.note) * (SURE - NOTE) / max(
-                self._tagger.sure - self._tagger.note, 1e-6)
-        return Issue(start, end, word, fixed, min(max(sure, NOTE), 1.0), "grammar")
+        # On the proofreader's one scale: the tagger's "sure" is SURE, its "note" NOTE.
+        if p >= sure:
+            scaled = SURE + (p - sure) * (1 - SURE) / max(1 - sure, 1e-6)
+        else:
+            scaled = NOTE + (p - note) * (SURE - NOTE) / max(sure - note, 1e-6)
+        return Issue(start, end, word, fixed, min(max(scaled, NOTE), 1.0), "grammar")
 
     def fix(self, text: str) -> tuple[str, list[Issue]]:
         """``text`` with the sure mistakes fixed, and the unsure ones left

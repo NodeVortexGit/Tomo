@@ -72,13 +72,15 @@ def cases(tagger: Tagger, sentences: list[tuple[list[str], list[str]]]):
             spell = tagger.label_id.get(grammar.SPELL)
             if spell in allowed:  # not a word: the dictionary's job
                 continue
-            out.append((logits[i, allowed], allowed.index(tagger.label_id[gold]), allowed.index(tagger.label_id[KEEP])))
+            kinds = [grammar.kind_of(tagger.labels[a]) for a in allowed]
+            out.append((logits[i, allowed], allowed.index(tagger.label_id[gold]), allowed.index(tagger.label_id[KEEP]),
+                        kinds))
     return out
 
 
 def nll(found, temperature: float) -> float:
     total = 0.0
-    for scores, gold, _ in found:
+    for scores, gold, *_ in found:
         z = scores / temperature
         z = z - z.max()
         total -= z[gold] - np.log(np.exp(z).sum())
@@ -90,7 +92,7 @@ def reliability(found, temperature: float) -> list[tuple[str, int, float]]:
     rows = []
     for lo, hi in zip(BINS, BINS[1:]):
         right = total = 0
-        for scores, gold, keep in found:
+        for scores, gold, keep, _ in found:
             z = scores / temperature
             p = np.exp(z - z.max())
             p /= p.sum()
@@ -137,50 +139,55 @@ def main() -> None:
         print("  confidence  changes  right")
         for span, n, share in reliability(found, t):
             print(f"  {span:10}  {n:7}  {share:.0%}" if n else f"  {span:10}  {n:7}  –")
-    # The cut-offs, from what its changes turn out to be: fixed by itself
-    # where they're right nine times in ten, told to the model where at
-    # least half are.
-    sure = cut_off(found, best, SURE_RIGHT)
-    note = min(cut_off(found, best, NOTE_RIGHT), sure)
-    for name, cut in (("note", note), ("sure", sure)):
-        changes = [(p, ok) for p, ok in changes_made(found, best) if p >= cut]
-        right = sum(ok for _, ok in changes) / max(len(changes), 1)
-        touched = sum(1 for p, _ in changes_made(clean_words, best) if p >= cut)
-        print(f"{name} from {cut:.2f}: {len(changes)} changes, {right:.0%} right; "
-              f"correct words changed: {touched} of {len(clean_words)} ({touched / max(len(clean_words), 1):.2%})")
+    # The cut-offs, for each kind of change, from what its changes turn out
+    # to be: fixed by itself where they're right nine times in ten, told
+    # to the model where at least half are.
+    cuts = {}
+    for kind in grammar.KINDS:
+        sure = cut_off(found, best, SURE_RIGHT, kind)
+        note = min(cut_off(found, best, NOTE_RIGHT, kind), sure)
+        cuts[kind] = (note, sure)
+        for name, cut in (("note", note), ("sure", sure)):
+            changes = [(p, ok) for p, ok in changes_made(found, best, kind) if p >= cut]
+            right = sum(ok for _, ok in changes) / max(len(changes), 1)
+            touched = sum(1 for p, _ in changes_made(clean_words, best, kind) if p >= cut)
+            print(f"{kind} {name} from {cut:.2f}: {len(changes)} changes, {right:.0%} right; correct words "
+                  f"changed: {touched} of {len(clean_words)} ({touched / max(len(clean_words), 1):.2%})")
     if args.write:
         with np.load(args.tagger, allow_pickle=False) as data:
-            weights = {k: data[k] for k in data.files if k not in ("temperature", "sure", "note")}
-        weights.update(temperature=np.array(best, dtype=np.float32), sure=np.array(sure, dtype=np.float32),
-                       note=np.array(note, dtype=np.float32))
+            weights = {k: data[k] for k in data.files if k != "temperature" and not k.startswith(("sure", "note"))}
+        weights["temperature"] = np.array(best, dtype=np.float32)
+        for kind, (note, sure) in cuts.items():
+            weights[f"note.{kind}"] = np.array(note, dtype=np.float32)
+            weights[f"sure.{kind}"] = np.array(sure, dtype=np.float32)
         np.savez_compressed(args.tagger, **weights)
-        print(f"\nstored temperature {best:.1f}, sure {sure:.2f}, note {note:.2f} in {args.tagger}")
-
+        print(f"\nstored temperature {best:.1f} and the cut-offs {cuts} in {args.tagger}")
 
 SURE_RIGHT = 0.9
 NOTE_RIGHT = 0.5
 MIN_CHANGES = 30  # a cut-off needs this many changes above it to be trusted
 
 
-def changes_made(found, temperature: float) -> list[tuple[float, bool]]:
-    """Each change it would suggest: its confidence, and whether it's right."""
+def changes_made(found, temperature: float, kind: str | None = None) -> list[tuple[float, bool]]:
+    """Each change (of ``kind``) it would suggest: its confidence, and
+    whether it's right."""
     out = []
-    for scores, gold, keep in found:
+    for scores, gold, keep, kinds in found:
         z = scores / temperature
         p = np.exp(z - z.max())
         p /= p.sum()
         best = int(p.argmax())
-        if best != keep:
+        if best != keep and (kind is None or kinds[best] == kind):
             out.append((float(p[best]), best == gold))
     return out
 
 
-def cut_off(found, temperature: float, wanted: float) -> float:
-    """The lowest confidence from which its changes are right ``wanted``
-    of the time (0.99 if none is)."""
-    changes = sorted(changes_made(found, temperature), reverse=True)
+def cut_off(found, temperature: float, wanted: float, kind: str) -> float:
+    """The lowest confidence from which its changes of ``kind`` are right
+    ``wanted`` of the time (1.01 if none is: that kind is never used)."""
+    changes = sorted(changes_made(found, temperature, kind), reverse=True)
     right = 0
-    best = 0.99
+    best = 1.01
     for n, (p, ok) in enumerate(changes, 1):
         right += ok
         if n >= MIN_CHANGES and right / n >= wanted:
