@@ -25,6 +25,11 @@ Guards learned the hard way:
   * gestures that need no reply end the turn a round sooner;
   * a 60-second budget, then a plain wrap-up;
   * one model for the whole session, kept even after an error.
+
+A Bulgarian reply goes past the proofreader (grammar.py) before it's shown:
+it fixes the mistakes it's sure of, and the model rewrites the reply once
+with the rest as notes. The mistakes are kept (db.py), and the ones near the
+next message are named to the model before it answers, so it learns them.
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ from typing import Any, Callable
 
 import httpx
 
-from . import attachments as attached, characters, desktop, platform, screen, sysinfo, volume
+from . import attachments as attached, characters, desktop, grammar, platform, screen, sysinfo, volume
 from .apps import DesktopApp, SystemCatalog, checked_launch, confirm_open, running_program
 from .commands import Executor
 from .config import (DEFAULT_VOICE_BG_FEMALE, DEFAULT_VOICE_BG_MALE, DEFAULT_VOICE_FEMALE, DEFAULT_VOICE_MALE, Config,
@@ -88,6 +93,10 @@ ACT_NOW = ("(You haven't done it yet: nothing happens after your answer. Call th
            "all of them in this reply, then say what they did.)")
 WRAP_UP = ("(That's all the tries there's time for. Don't call any more tools: tell me in one "
            "or two sentences what you found, or what went wrong.)")
+PROOFREAD = ("(A Bulgarian proofreader checked your reply: {notes}. Write the reply again with these "
+             "corrected where they are right — the same meaning, nothing else changed, no tools. Only the reply.)")
+FORMER_MISTAKES = ("(Mistakes you made in Bulgarian before — write these words correctly: {mistakes}.)")
+FORMER_MISTAKES_SHOWN = 5
 VOICE_CHOICE = ("You choose the voice of a 3D character who lives on the user's desktop. Look at the "
                 "character's picture and details, then call set_voice once: male or female.")
 # The character's picture, as the model sees it when choosing its voice (px).
@@ -176,6 +185,7 @@ class AiClient:
         self._server_lock = asyncio.Lock()
         self._told_small = False
         self._choosing: set[str] = set()  # characters whose voice is being chosen
+        self.proofreader = grammar.Proofreader(cfg.assets_dir / "grammar") if cfg.proofread else None
 
     def tools(self) -> list[dict]:
         cfg = self.cfg
@@ -206,15 +216,60 @@ class AiClient:
         history = self.db.recent_messages(MODEL_CONTEXT, chat)
         # Pictures alone: answer in the language the user last wrote in.
         spoken = user_text or next((line.text for line in reversed(history) if line.role == Role.USER), "")
-        messages = [Msg("system", self.system_prompt(Language.of(spoken)))] + await asyncio.to_thread(
+        language = Language.of(spoken)
+        messages = [Msg("system", self.system_prompt(language))] + await asyncio.to_thread(
             conversation, history, user_text, images)
+        if language == Language.BULGARIAN and self.proofreader is not None:
+            # At the end, not in the system prompt: the start the server has
+            # cached stays the same.
+            mistakes = await asyncio.to_thread(self.db.mistakes_for, user_text, FORMER_MISTAKES_SHOWN)
+            if mistakes and messages[-1].role == "user":
+                messages[-1].text += "\n\n" + FORMER_MISTAKES.format(mistakes="; ".join(mistakes))
         ui(Thinking(True))
         try:
             # One model for the brain: kept even after an error — the next
             # turn asks it again (Ollama reloads a dropped model on its own).
-            return await self.run_tool_loop(server, messages, ui)
+            reply = await self.run_tool_loop(server, messages, ui)
+            if Language.of(reply) == Language.BULGARIAN and self.proofreader is not None:
+                reply = await self.proofread(server, messages, reply)
+            return reply
         finally:
             ui(Thinking(False))
+
+    async def proofread(self, server: Server, messages: list[Msg], reply: str) -> str:
+        """``reply`` with its Bulgarian mistakes fixed: the proofreader's sure
+        ones by itself, the others by the model, asked once with them as notes."""
+        assert self.proofreader is not None
+        try:
+            fixed, unsure = await asyncio.to_thread(self.proofreader.fix, reply)
+            caught = await asyncio.to_thread(self.proofreader.check, reply)
+        except Exception as e:  # noqa: BLE001 - a broken checker mustn't lose the reply
+            log.warning("the proofreader failed: %s", e)
+            return reply
+        for issue in caught:
+            if issue.fix is not None:
+                self.db.add_mistake(issue.wrong, issue.fix, issue.kind)
+        if caught:
+            log.info("proofreader: %s", "; ".join(i.note() for i in caught))
+        if not unsure:
+            return fixed
+        tools = self.tools()
+        ask = messages + [Msg("assistant", fixed),
+                          Msg("user", PROOFREAD.format(notes="; ".join(i.note() for i in unsure)))]
+        try:
+            again, _ = await self.chat(server, ask, tools, tool_names(tools))
+        except Exception as e:  # noqa: BLE001
+            log.info("the model couldn't rewrite its reply: %s", e)
+            return fixed
+        again = again.strip()
+        if not again or Language.of(again) != Language.BULGARIAN:
+            return fixed
+        rewritten, left = await asyncio.to_thread(self.proofreader.fix, again)
+        # The rewrite only if it's better: fewer mistakes left, and not a
+        # different answer (about as long).
+        if len(left) < len(unsure) and 0.5 <= len(rewritten) / max(len(fixed), 1) <= 2:
+            return rewritten
+        return fixed
 
     async def warm_up(self) -> None:
         """Have Ollama load the model now, at start: a reply's request, one
