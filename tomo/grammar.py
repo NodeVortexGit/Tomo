@@ -6,8 +6,9 @@ its noun, Russian words, misspellings. Like the memory (db.py) hands the model
 what it knows about the user, this hands it what's wrong with its reply, and
 fixes what it's sure of on its own. Three parts, all offline and small:
 
-  Lexicon   the Bulgarian Hunspell dictionary (bgoffice, ~1.6 MB): which words
-            exist, every form of a word, the nearest words to a misspelling.
+  Lexicon   the Bulgarian Hunspell dictionary (bgoffice, ~1.6 MB) and Tomo's
+            own words (tomo.dic): which words exist, every form of a word,
+            the word a misspelling was meant to be.
   Tagger    a tiny network (~1M weights, numpy only) trained by
             scripts/train_grammar.py: for each word, keep it or change its
             ending ("-а" → "-ът"), from the sentence around it.
@@ -54,9 +55,12 @@ RUSSIAN = {
     "давай": "хайде", "вот": "ето", "здорово": "чудесно", "ничего": "нищо", "чего": "какво",
 }
 
-# Below this, the tagger's change is a note for the model, not a fix.
+# From this sure, a mistake is fixed at once; from NOTE, the model is told.
 SURE = 0.85
 NOTE = 0.5
+MIN_SPELLING = 4  # shorter unknown words aren't taken for misspellings
+# Short words a space is often left out after ("незнам" is "не знам").
+JOINED = ("не", "по", "на", "за", "от", "до", "в", "с", "да", "ще")
 
 
 @dataclass(frozen=True)
@@ -78,10 +82,10 @@ class Issue:
 
 
 class Lexicon:
-    """A Hunspell dictionary (.aff + .dic) with suffix rules only, as the
-    Bulgarian one has: stems with flags, each flag a set of endings."""
+    """A Hunspell dictionary (.aff + .dic files) with suffix rules only, as
+    the Bulgarian one has: stems with flags, each flag a set of endings."""
 
-    def __init__(self, aff: Path, dic: Path) -> None:
+    def __init__(self, aff: Path, *dics: Path) -> None:
         # flag → [(strip, add, condition)]; add → [(flag, strip, condition)]
         self.rules: dict[str, list[tuple[str, str, re.Pattern | None]]] = {}
         by_ending: dict[str, list[tuple[str, str, re.Pattern | None]]] = {}
@@ -98,11 +102,12 @@ class Lexicon:
         self._by_ending = by_ending
         self._longest = max(map(len, by_ending), default=0)
         self.stems: dict[str, str] = {}  # stem → its flags
-        lines = dic.read_text(encoding="utf-8").splitlines()
-        for line in lines[1:]:
-            stem, _, flags = line.strip().partition("/")
-            if stem:
-                self.stems[stem] = self.stems.get(stem, "") + flags
+        for dic in dics:
+            # The first line of a .dic is how many words it has.
+            for line in dic.read_text(encoding="utf-8").splitlines()[1:]:
+                stem, _, flags = line.strip().partition("/")
+                if stem:
+                    self.stems[stem] = self.stems.get(stem, "") + flags
         self._lock = threading.Lock()
         self._known: dict[str, bool] = {}
 
@@ -112,9 +117,10 @@ class Lexicon:
         found = []
         if word in self.stems:
             found.append((word, ""))
-        for n in range(1, min(self._longest, len(word)) + 1):
-            for flag, strip, pattern in self._by_ending.get(word[-n:], ()):
-                stem = word[:-n] + strip
+        # n = 0: endings that only take letters away ("открия" → "откри").
+        for n in range(0, min(self._longest, len(word)) + 1):
+            for flag, strip, pattern in self._by_ending.get(word[len(word) - n:], ()):
+                stem = word[: len(word) - n] + strip
                 flags = self.stems.get(stem)
                 if flags is not None and flag in flags and (pattern is None or pattern.search(stem)):
                     found.append((stem, flag))
@@ -176,6 +182,56 @@ class Lexicon:
         if word[:1].isupper():
             ranked = [w[:1].upper() + w[1:] for w in ranked]
         return ranked[:limit]
+
+
+def spelling_fix(word: str, lexicon: Lexicon) -> tuple[str | None, float]:
+    """The word a misspelled ``word`` was meant to be, and how sure that is.
+    One typical slip — letters that sound alike, a letter doubled or one of
+    a double dropped, a lost "т" or "д", neighbours swapped, a missing space
+    — is sure; one weaker or one of several is for the model to judge;
+    anything else is likely a word the dictionary lacks, not a slip."""
+    lower = word.lower()
+    letters = "абвгдежзийклмнопрстуфхцчшщъьюя"
+    near = sorted({w for w in _edits(lower, letters) if lexicon.known(w)}, key=lambda w: _rank(lower, w))
+    for cut in range(1, 3):
+        head, rest = lower[:cut], lower[cut:]
+        if head in JOINED and len(rest) >= 3 and lexicon.known(rest):
+            near.insert(0, f"{head} {rest}")
+            break
+    if not near:
+        return None, 0.0
+    strong = [w for w in near if _slip(lower, w) == 2]
+    if len(strong) == 1:
+        # A missing space against another fix ("впредвид": "в предвид"? "предвид"?)
+        alone = " " not in strong[0] or len(near) == 1
+        return _like(word, strong[0]), 0.9 if alone and len(near) <= 6 else 0.6
+    weak = strong or [w for w in near if _slip(lower, w) == 1]
+    if weak and len(weak) <= 3:
+        return _like(word, weak[0]), 0.6
+    return None, 0.0
+
+
+def _slip(wrong: str, right: str) -> int:
+    """How typical a slip turns ``right`` into ``wrong``: 2 typical, 1 a
+    plain one-letter change, 0 more than that."""
+    if " " in right:
+        return 2 if right.replace(" ", "") == wrong else 0
+    if len(wrong) == len(right):
+        diff = [i for i, (a, b) in enumerate(zip(wrong, right)) if a != b]
+        if len(diff) == 1:
+            return 2 if frozenset((wrong[diff[0]], right[diff[0]])) in _NEAR else 1
+        swapped = len(diff) == 2 and diff[1] == diff[0] + 1 and wrong[diff[0]] == right[diff[1]]
+        return 2 if swapped else 0
+    longer, shorter = (wrong, right) if len(wrong) > len(right) else (right, wrong)
+    if len(longer) != len(shorter) + 1:
+        return 0
+    i = next((i for i, (a, b) in enumerate(zip(longer, shorter)) if a != b), len(shorter))
+    if shorter[:i] + longer[i] + shorter[i:] != longer:
+        return 0
+    doubled = (i > 0 and longer[i] == longer[i - 1]) or (i + 1 < len(longer) and longer[i] == longer[i + 1])
+    lost = len(right) > len(wrong) and longer[i] in "тдв"  # "помоща", "чуствам"
+    spoken = wrong.endswith("ме") and right == wrong[:-1]  # "правиме" for "правим"
+    return 2 if doubled or lost or spoken else 1
 
 
 def _edits(word: str, letters: str) -> list[str]:
@@ -316,6 +372,12 @@ def _sigmoid(x: np.ndarray) -> np.ndarray:
     return 1 / (1 + np.exp(-x))
 
 
+def dictionaries(folder: Path) -> list[Path]:
+    """The Bulgarian dictionary, then Tomo's own words (tomo.dic: newer
+    words, and common ones bg_BG lacks — "също", "три", "интернет")."""
+    return [p for p in (folder / "bg_BG.dic", folder / "tomo.dic") if p.is_file() or p.name == "bg_BG.dic"]
+
+
 # ---- the proofreader ------------------------------------------------------------------
 
 
@@ -335,7 +397,7 @@ class Proofreader:
                 return
             self._loaded = True
             try:
-                self._lexicon = Lexicon(self.folder / "bg_BG.aff", self.folder / "bg_BG.dic")
+                self._lexicon = Lexicon(self.folder / "bg_BG.aff", *dictionaries(self.folder))
             except OSError as e:
                 log.info("no Bulgarian dictionary (%s): spelling isn't checked", e)
             try:
@@ -376,15 +438,12 @@ class Proofreader:
         if russian is not None and (lexicon is None or not lexicon.known(word)):
             return Issue(start, end, word, _like(word, russian), 0.95, "russian")
         if lexicon is not None and not lexicon.known(word):
-            # A capital mid-sentence is a name the dictionary needn't know.
-            if word[:1].isupper() and not first:
+            # A capital mid-sentence is a name the dictionary needn't know;
+            # a short word is too easily something else.
+            if (word[:1].isupper() and not first) or len(word) < MIN_SPELLING:
                 return None
-            options = lexicon.suggest(word)
-            if not options:
-                return Issue(start, end, word, None, 0.5, "spelling")
-            sure = 0.9 if len(options) == 1 else 0.6
-            # The tagger may know which of several fits the sentence.
-            return Issue(start, end, word, options[0], sure, "spelling")
+            fix, sure = spelling_fix(word, lexicon)
+            return Issue(start, end, word, fix, sure, "spelling") if fix and sure >= NOTE else None
         if probs is None:
             return None
         best = int(np.argmax(probs))

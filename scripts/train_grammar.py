@@ -11,14 +11,17 @@ spoils on purpose, the way a model writing Bulgarian does:
   - a misspelled word (marked SPELL: the dictionary fixes those).
 
 Correct Bulgarian: Bulgarian Wikipedia (wikimedia/wikipedia, 20231101.bg, one
-of its parquet files) and the correct sides of thebogko's Bulgarian spelling
+of its parquet files), Bulgarian film subtitles for how people talk (OPUS
+OpenSubtitles 2018, the start of mono/bg.txt.gz; only lines whose every word
+the dictionary knows), and the correct sides of thebogko's Bulgarian spelling
 and grammar mistakes (Apache-2.0); their wrong sides are the test.
 
   pip install torch pyarrow
   python scripts/train_grammar.py --data DIR --out assets/grammar/tagger.npz
 
-DIR holds bg_BG.aff, bg_BG.dic, a Wikipedia .parquet, spell_errors.csv and
-grammar_errors.csv. Takes about an hour on four CPU cores.
+DIR holds a Wikipedia .parquet, subs.txt (subtitles, a line each),
+spell_errors.csv and grammar_errors.csv; the dictionary comes from
+assets/grammar. Takes about an hour on four CPU cores.
 """
 
 from __future__ import annotations
@@ -50,11 +53,14 @@ LETTERS = "абвгдежзийклмнопрстуфхцчшщъьюя"
 ARTICLE = [("ът", "а"), ("ят", "я"), ("а", "ът"), ("я", "ят")]
 
 _lexicon: Lexicon | None = None
+ASSETS = Path(__file__).resolve().parent.parent / "assets" / "grammar"
+# A preposition before a full article: a common mistake in subtitles.
+FULL_AFTER_PREPOSITION = re.compile(r"\b(?:на|в|във|с|със|за|от|до|по|при|към|без|през|над|под)\s+\w+(?:ът|ят)\b", re.I)
 
 
-def init_worker(aff: str, dic: str) -> None:
+def init_worker(folder: str) -> None:
     global _lexicon
-    _lexicon = Lexicon(Path(aff), Path(dic))
+    _lexicon = Lexicon(Path(folder) / "bg_BG.aff", *grammar.dictionaries(Path(folder)))
 
 
 # ---- correct sentences -------------------------------------------------------------
@@ -77,8 +83,26 @@ def wiki_sentences(parquet: Path, limit: int, seed: int) -> list[str]:
     return out[:limit]
 
 
-def good_sentence(s: str) -> bool:
-    if not (20 <= len(s) <= 300) or s[-1] not in ".!?" or not s[0].isupper():
+def subtitle_sentences(path: Path, limit: int, seed: int) -> list[str]:
+    """Spoken Bulgarian: subtitle lines that are whole sentences, every
+    word of them known to the dictionary."""
+    out, seen = [], set()
+    with path.open(encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            s = line.strip().lstrip("-–— ").strip()
+            if s in seen or not good_sentence(s, shortest=12) or FULL_AFTER_PREPOSITION.search(s):
+                continue
+            words = [t for _, _, t in grammar.tokens(s) if WORD.fullmatch(t)]
+            if len(words) < 3 or not all(_lexicon.known(w) for w in words):
+                continue
+            seen.add(s)
+            out.append(s)
+    random.Random(seed).shuffle(out)
+    return out[:limit]
+
+
+def good_sentence(s: str, shortest: int = 20) -> bool:
+    if not (shortest <= len(s) <= 300) or s[-1] not in ".!?" or not s[0].isupper():
         return False
     letters = [c for c in s if c.isalpha()]
     cyr = sum(1 for c in letters if "а" <= c.lower() <= "я")
@@ -94,14 +118,17 @@ def spoil(sentence: str, rng: random.Random) -> tuple[list[str], list[str]]:
     labels = [KEEP] * len(toks)
     if rng.random() < CLEAN:
         return toks, labels
-    words = [i for i, t in enumerate(toks) if WORD.fullmatch(t) and len(t) > 1 and t.islower()]
+    # Lower-case words, and the capitalised first one (often the subject).
+    words = [i for i, t in enumerate(toks) if WORD.fullmatch(t) and len(t) > 1
+             and (t.islower() or (i == 0 and t[1:].islower()))]
     rng.shuffle(words)
     for i in words[: rng.choice((1, 1, 1, 2, 2, 3))]:
-        right = toks[i]
+        capital = toks[i][:1].isupper()
+        right = toks[i].lower()
         if rng.random() < SPELLING:
             wrong = misspell(right, rng)
             if wrong and not _lexicon.known(wrong):
-                toks[i], labels[i] = wrong, SPELL
+                toks[i], labels[i] = _capital(wrong, capital), SPELL
             continue
         wrong = other_form(right, rng)
         if wrong is None:
@@ -109,8 +136,12 @@ def spoil(sentence: str, rng: random.Random) -> tuple[list[str], list[str]]:
         label = grammar.ending_change(wrong, right)
         if label is None or label == KEEP:
             continue
-        toks[i], labels[i] = wrong, label
+        toks[i], labels[i] = _capital(wrong, capital), label
     return toks, labels
+
+
+def _capital(word: str, capital: bool) -> str:
+    return word[:1].upper() + word[1:] if capital else word
 
 
 def other_form(word: str, rng: random.Random) -> str | None:
@@ -171,7 +202,7 @@ def pair_labels(wrong: str, right: str) -> tuple[list[str], list[str]] | None:
         if not _lexicon.known(x):
             labels.append(SPELL)
             continue
-        label = grammar.ending_change(x, y)
+        label = grammar.ending_change(x.lower(), y.lower())
         if label is None:
             return None
         labels.append(label)
@@ -287,7 +318,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", type=Path, required=True)
     ap.add_argument("--out", type=Path, default=Path("assets/grammar/tagger.npz"))
-    ap.add_argument("--sentences", type=int, default=600_000)
+    ap.add_argument("--sentences", type=int, default=350_000, help="from Wikipedia")
+    ap.add_argument("--spoken", type=int, default=350_000, help="from the subtitles")
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--embed", type=int, default=32)
@@ -300,12 +332,15 @@ def main() -> None:
 
     torch.manual_seed(args.seed)
     rng = random.Random(args.seed)
-    aff, dic = args.data / "bg_BG.aff", args.data / "bg_BG.dic"
-    init_worker(str(aff), str(dic))
+    init_worker(str(ASSETS))
 
     t0 = time.time()
     parquet = next(args.data.glob("*.parquet"))
     sentences = wiki_sentences(parquet, args.sentences, args.seed)
+    if (args.data / "subs.txt").is_file():
+        spoken = subtitle_sentences(args.data / "subs.txt", args.spoken, args.seed)
+        print(f"{len(spoken)} spoken sentences, e.g. {spoken[:3]}", flush=True)
+        sentences += spoken
     # thebogko's pronoun "mistakes" are standard Bulgarian ("към кого"): left out.
     skip = {"pronoun_misuse"}
     grammar_pairs = read_pairs(args.data / "grammar_errors.csv", skip)
@@ -317,7 +352,7 @@ def main() -> None:
     sentences += [right for _, _, right in test_pairs[4000:] if good_sentence(right) and right not in held]
     print(f"{len(sentences)} sentences in {time.time() - t0:.0f}s", flush=True)
 
-    with multiprocessing.Pool(4, init_worker, (str(aff), str(dic))) as pool:
+    with multiprocessing.Pool(4, init_worker, (str(ASSETS),)) as pool:
         items = [x for x in pool.imap(encode, ((s, args.seed * 1_000_003 + i) for i, s in enumerate(sentences)),
                                       chunksize=500) if x is not None]
     print(f"spoiled and encoded in {time.time() - t0:.0f}s", flush=True)

@@ -11,20 +11,20 @@ from tomo.ai import AiClient, SharedCatalog
 from tomo.commands import Executor
 from tomo.config import Config, LlmProvider
 from tomo.db import Store
-from tomo.grammar import KEEP, Lexicon, Proofreader, apply_change, ending_change
+from tomo.grammar import KEEP, Lexicon, Proofreader, apply_change, dictionaries, ending_change, spelling_fix
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets" / "grammar"
 
 
 @pytest.fixture(scope="module")
 def lexicon():
-    return Lexicon(ASSETS / "bg_BG.aff", ASSETS / "bg_BG.dic")
+    return Lexicon(ASSETS / "bg_BG.aff", *dictionaries(ASSETS))
 
 
 @pytest.fixture
 def spelling_only(tmp_path):
     """The proofreader with the dictionary and no tagger."""
-    for name in ("bg_BG.aff", "bg_BG.dic"):
+    for name in ("bg_BG.aff", "bg_BG.dic", "tomo.dic"):
         (tmp_path / name).write_bytes((ASSETS / name).read_bytes())
     return Proofreader(tmp_path)
 
@@ -32,9 +32,24 @@ def spelling_only(tmp_path):
 def test_the_dictionary_knows_bulgarian_words_in_every_form(lexicon):
     for word in ("компютърът", "компютъра", "хубавите", "отворих", "по-добре", "Германия", "Добре"):
         assert lexicon.known(word), word
-    for word in ("резолтат", "является", "правиме", "Firefox"):
+    for word in ("резолтат", "является", "правиме", "Firefox", "видяли"):
         assert not lexicon.known(word), word
+    # Forms made by only taking letters away, and Tomo's own words.
+    for word in ("откри", "обеща", "също", "три", "интернет", "гигабайта", "таймерът", "мамо"):
+        assert lexicon.known(word), word
     assert {"компютър", "компютъра", "компютърът", "компютри", "компютрите"} <= lexicon.forms("компютъра")
+
+
+def test_only_a_typical_slip_is_sure(lexicon):
+    sure = {"незнам": "не знам", "подяволите": "по дяволите", "чуствам": "чувствам", "помоща": "помощта",
+            "обикновенно": "обикновено", "свещенник": "свещеник", "видяли": "видели", "правиме": "правим",
+            "резолтат": "резултат", "приложениито": "приложението", "Компутър": "Компютър"}
+    for wrong, right in sure.items():
+        assert spelling_fix(wrong, lexicon) == (right, 0.9), wrong
+    # One fix among others, or a plainer change: for the model to judge.
+    for wrong in ("впредвид", "съжелявам", "безопастност"):
+        assert spelling_fix(wrong, lexicon)[1] == 0.6, wrong
+    assert spelling_fix("бзхтрпщ", lexicon) == (None, 0.0), "no near word: not a slip"
 
 
 def test_a_misspelling_gets_the_nearest_words(lexicon):
@@ -62,10 +77,16 @@ def test_names_mid_sentence_and_latin_words_are_left_alone(spelling_only):
     assert spelling_only.check("Отворих Spotify за Мирослава и Гошко.") == []
 
 
-def test_a_word_with_no_near_match_is_left_for_the_model(spelling_only):
-    issues = spelling_only.check("Това е бзхтрпщ.")
-    assert [(i.wrong, i.fix) for i in issues] == [("бзхтрпщ", None)]
-    assert "not a Bulgarian word" in issues[0].note()
+def test_unknown_words_far_from_any_word_are_left_alone(spelling_only):
+    """A word the dictionary lacks, not a misspelling; short ones too."""
+    assert spelling_only.check("Това е бзхтрпщ, щрк.") == []
+
+
+def test_a_slip_the_proofreader_isnt_sure_of_is_a_note(spelling_only):
+    text, left = spelling_only.fix("Съжелявам, но незнам.")
+    assert text == "Съжелявам, но не знам."
+    assert [(i.wrong, i.fix) for i in left] == [("Съжелявам", "Съжалявам")]
+    assert left[0].note() == "„Съжелявам“ → „Съжалявам“ (spelling)"
 
 
 def test_without_its_files_the_proofreader_changes_nothing(tmp_path):
@@ -119,7 +140,7 @@ def turn(tmp_path, replies, user="Как е компютърът?"):
 
     cfg = Config.for_tests(tmp_path)
     cfg.llm_provider, cfg.llm_url = LlmProvider.OLLAMA, "http://fake:11434"
-    for name in ("bg_BG.aff", "bg_BG.dic"):
+    for name in ("bg_BG.aff", "bg_BG.dic", "tomo.dic"):
         (cfg.assets_dir / "grammar").mkdir(parents=True, exist_ok=True)
         (cfg.assets_dir / "grammar" / name).write_bytes((ASSETS / name).read_bytes())
     store = Store(tmp_path / "chroma")
@@ -137,14 +158,14 @@ def test_a_sure_mistake_is_fixed_without_asking_the_model_again(tmp_path):
 
 
 def test_an_unsure_mistake_goes_back_to_the_model_once(tmp_path):
-    reply, seen, _ = turn(tmp_path, ["Това е бзхтрпщ.", "Това е добре."])
-    assert reply == "Това е добре."
-    assert len(seen) == 2 and "бзхтрпщ" in seen[1]["messages"][-1]["content"]
+    reply, seen, _ = turn(tmp_path, ["Съжелявам, не мога.", "Съжалявам, не мога."])
+    assert reply == "Съжалявам, не мога."
+    assert len(seen) == 2 and "Съжелявам" in seen[1]["messages"][-1]["content"]
 
 
 def test_a_rewrite_that_isnt_better_is_dropped(tmp_path):
-    reply, seen, _ = turn(tmp_path, ["Това е бзхтрпщ.", "Това е бзхтрпщ и щзхрт."])
-    assert reply == "Това е бзхтрпщ."
+    reply, seen, _ = turn(tmp_path, ["Съжелявам, не мога.", "Съжелявам, безопастност."])
+    assert reply == "Съжелявам, не мога."
 
 
 def test_english_replies_are_not_proofread(tmp_path):
