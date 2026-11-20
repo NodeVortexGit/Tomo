@@ -9,7 +9,7 @@ fixes what it's sure of on its own. Three parts, all offline and small:
   Lexicon   the Bulgarian Hunspell dictionary (bgoffice, ~1.6 MB) and Tomo's
             own words (tomo.dic): which words exist, every form of a word,
             the word a misspelling was meant to be.
-  Tagger    a tiny network (~1M weights, numpy only) trained by
+  Tagger    a tiny network (~1.4M weights, numpy only) trained by
             scripts/train_grammar.py: for each word, keep it or change its
             ending ("-а" → "-ът"), from the sentence around it.
   Russian   the Russian words models slip into Bulgarian, with their

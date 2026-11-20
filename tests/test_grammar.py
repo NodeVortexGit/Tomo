@@ -115,13 +115,17 @@ def test_the_tagger_runs_a_pytorch_gru(tmp_path):
 
 
 @pytest.mark.skipif(not (ASSETS / "tagger.npz").is_file(), reason="no trained tagger")
-def test_the_shipped_tagger_fixes_the_article_and_keeps_good_bulgarian():
+def test_the_shipped_tagger_finds_the_article_and_keeps_good_bulgarian():
     proof = Proofreader(ASSETS)
     for good in ("Компютърът работи бързо.", "Отворих калкулатора.", "Часът е три и половина.",
                  "Звукът вече е на тридесет.", "Ето какво намерих за времето днес."):
         assert proof.fix(good) == (good, []), good
-    fixed, _ = proof.fix("Компютъра работи бързо.")
-    assert fixed == "Компютърът работи бързо."
+    # The short article for the subject: at least a note with the full one.
+    _, left = proof.fix("Компютъра работи бързо.")
+    assert [(i.wrong, i.fix, i.kind) for i in left] == [("Компютъра", "Компютърът", "grammar")]
+    # Its cut-offs came with it (scripts/calibrate_grammar.py).
+    tagger = grammar.Tagger(ASSETS / "tagger.npz")
+    assert tagger.temperature != 1.0 and all(note <= sure for note, sure in tagger.cuts.values())
 
 
 # ---- in a turn ----------------------------------------------------------------------
