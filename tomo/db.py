@@ -1,7 +1,7 @@
 """Long-term memory, in ChromaDB.
 
 What lets the assistant remember preferences and facts across restarts, and
-pull them back out before answering. Six collections:
+pull them back out before answering. Seven collections:
 
   preferences  key → value the user set or the AI inferred ("name" → "Alex")
   memories     free-form facts worth keeping, each with an importance, and an
@@ -13,6 +13,9 @@ pull them back out before answering. Six collections:
   characters   the VRM models on offer, which one is showing, and each
                one's voice (male or female, as the model chose it)
   snapshots    cached OS scans (the app catalogue), with a fingerprint
+  mistakes     the Bulgarian mistakes the proofreader caught in Tomo's
+               replies (grammar.py), how often each, embedded like the
+               memories: the ones near the user's message warn the model
 
 Preferences and memories belong to no chat: what Tomo knows about the user
 holds in every chat, new ones too.
@@ -121,6 +124,7 @@ class Store:
         self.characters = collection("characters")
         self.snapshots = collection("snapshots")
         self.memories = collection("memories", embedding=embeddings)
+        self.mistakes = collection("mistakes")
         # A collection keeps the embedding it was made with.
         self._embedding = (self.memories.metadata or {}).get("embedding", "ngram")
         if self._embedding != embeddings:
@@ -211,6 +215,37 @@ class Store:
         documents, distances = near["documents"][0], near["distances"][0]
         return bool(documents) and (documents[0].strip().lower() == content.strip().lower()
                                     or distances[0] <= SAME_MEMORY)
+
+    # ---- the proofreader's mistakes ------------------------------------------------
+
+    def add_mistake(self, wrong: str, right: str, kind: str) -> None:
+        """Count a mistake the proofreader caught: ``wrong`` written for ``right``."""
+        key = f"{wrong.lower()}\u2192{right.lower()}"
+        mistake_id = f"mis-{hashlib.blake2b(key.encode(), digest_size=8).hexdigest()}"
+        with self._lock:
+            got = self.mistakes.get(ids=[mistake_id])
+            count = int(got["metadatas"][0].get("count", 0)) + 1 if got["ids"] else 1
+            self.mistakes.upsert(ids=[mistake_id], documents=[f"„{wrong}“ → „{right}“"],
+                                 embeddings=[ngram_embedding(f"{wrong} {right}")],
+                                 metadatas=[{"kind": kind, "count": count, "updated_at": now_ms()}])
+
+    def mistakes_for(self, text: str, limit: int) -> list[str]:
+        """Past mistakes to warn the model of before it answers ``text``: the
+        ones near its words first, then the most frequent."""
+        with self._lock:
+            count = self.mistakes.count()
+            if count == 0 or limit <= 0:
+                return []
+            near = self.mistakes.query(query_embeddings=[ngram_embedding(text)], n_results=min(limit, count))
+            every = self.mistakes.get(include=["documents", "metadatas"])
+        picked = [d for d, distance in zip(near["documents"][0], near["distances"][0]) if distance <= RELATED]
+        frequent = sorted(zip(every["documents"], every["metadatas"]), key=lambda r: -int(r[1].get("count", 0)))
+        for document, meta in frequent:
+            if len(picked) >= limit:
+                break
+            if document not in picked and int(meta.get("count", 0)) > 1:
+                picked.append(document)
+        return picked[:limit]
 
     # ---- the chats ----------------------------------------------------------------
 

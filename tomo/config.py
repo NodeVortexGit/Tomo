@@ -83,6 +83,8 @@ class Config:
     # How memories are embedded for search: "ngram" (built in, offline,
     # language-independent) or "minilm" (ChromaDB's stock English model).
     embeddings: str = "ngram"
+    # Proofread Tomo's Bulgarian before it's shown and spoken (grammar.py).
+    proofread: bool = True
 
     @property
     def chroma_dir(self) -> Path:
@@ -147,6 +149,7 @@ class Config:
             use_mouse=env_bool("TOMO_USE_MOUSE", True),
             wake_word=env_bool("TOMO_WAKE_WORD", True),
             embeddings=(env_str("TOMO_EMBEDDINGS") or "ngram").lower(),
+            proofread=env_bool("TOMO_PROOFREAD", True),
         )
 
     @classmethod
