@@ -124,34 +124,34 @@ tomo/
 
 ## Screenshots
 
-![Чатът до персонажа](docs/screenshots/01-chat-full.webp)
+![Чатът до персонажа](docs/screenshots/01-chat-full.png)
 *Чатът до персонажа: разговор на български и английски*
 
-![Персонажът след хвърляне](docs/screenshots/02-landed-full.webp)
+![Персонажът след хвърляне](docs/screenshots/02-landed-full.png)
 *Хвърлен с мишката — персонажът пада и се приземява на земята*
 
-![Персонажът във въздуха](docs/screenshots/03-flying-full.webp)
+![Персонажът във въздуха](docs/screenshots/03-flying-full.png)
 *Във въздуха, след като е хвърлен*
 
-![Персонажът се преобръща](docs/screenshots/04-tumbling-full.webp)
+![Персонажът се преобръща](docs/screenshots/04-tumbling-full.png)
 *Преобръща се във въздуха*
 
-![Персонажът седи](docs/screenshots/05-sitting-full.webp)
+![Персонажът седи](docs/screenshots/05-sitting-full.png)
 *Когато никой не го занимава, сяда и почива*
 
-![Нов чат](docs/screenshots/06-new-chat-full.webp)
+![Нов чат](docs/screenshots/06-new-chat-full.png)
 *Нов чат — наученото за потребителя се пренася и в него*
 
-![Предишните чатове](docs/screenshots/07-history-full.webp)
+![Предишните чатове](docs/screenshots/07-history-full.png)
 *Бутонът за предишните чатове*
 
-![Смяна на персонажа](docs/screenshots/08-character-full.webp)
+![Смяна на персонажа](docs/screenshots/08-character-full.png)
 *Бутонът за смяна на персонажа*
 
-![Скриване встрани](docs/screenshots/09-hide-full.webp)
+![Скриване встрани](docs/screenshots/09-hide-full.png)
 *Скриване встрани на екрана*
 
-![Гласът на отговорите](docs/screenshots/10-voice-full.webp)
+![Гласът на отговорите](docs/screenshots/10-voice-full.png)
 *Гласът на отговорите: включен или изключен*
 
 ## Допълнителна документация
