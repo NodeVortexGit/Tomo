@@ -25,7 +25,7 @@ tomo.log
 # Character models carry their own licences (see each .vrm's meta). Keep them
 # local unless the licence allows redistribution — then whitelist them here.
 assets/characters/*.vrm
-!assets/characters/female model.vrm
+!assets/characters/female_refined.vrm
 
 # Windows installer build products (packaging/windows)
 packaging/windows/uv/
