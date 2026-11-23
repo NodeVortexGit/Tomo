@@ -49,6 +49,7 @@ Source: "..\..\tomo\body\*.py"; DestDir: "{app}\tomo\body"; Flags: ignoreversion
 Source: "..\..\tomo\body\*.glsl"; DestDir: "{app}\tomo\body"; Flags: ignoreversion
 Source: "..\..\scripts\*.py"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "..\..\assets\characters\*.vrm"; DestDir: "{app}\assets\characters"; Flags: ignoreversion
+Source: "..\..\assets\grammar\*.json"; DestDir: "{app}\assets\grammar"; Flags: ignoreversion
 Source: "..\..\pyproject.toml"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion

@@ -37,6 +37,14 @@ the screen with room on its left for her, and she walks to its new side.
 The size is kept for the next start (SetChatSize; the brain sends it back
 as ChatSize).
 
+Tomo's reply appears a word at a time as it's written (a draft while the
+model writes it, then the reply itself), at a steady pace however the words
+arrive: REVEAL_RATE characters a second, and faster while more is waiting
+(as if to bring it all out in REVEAL_LAG seconds), so it doesn't fall far
+behind. With the voice on, the words wait for it instead: the brain says how
+far they may go and in how long (RevealTo), so each sentence comes out while
+it's spoken.
+
 Typing "/" offers the slash commands (slash.py) above the text box, as
 they fit what's typed: click one, or press Tab for the first, to put it in
 the box. A command goes to the brain like a message, without the pictures
@@ -99,6 +107,8 @@ LINE_END_W = 4.0  # px of highlight past a row's end where the selection runs on
 COPY_BOX = 16.0  # px: the copy button by a message's name
 COPIED_SECS = 1.5  # the "copied" tick or note
 SCROLL_SPEED = 10.0  # selecting past the transcript's edge: px a second per px beyond it
+REVEAL_RATE = 70.0  # characters a second as Tomo's reply appears…
+REVEAL_LAG = 1.5  # …faster while more waits: at the pace that would bring it all out in this many seconds
 CHATS_W = PANEL_W - 44.0  # px: the list of earlier chats…
 CHATS_SHOWN = 10  # …how many rows of it show at once…
 CHAT_ROW = 24.0  # …how tall each is…
@@ -437,6 +447,11 @@ class ChatState:
     phase: Phase = Phase.CLOSED
     liquid_t: float = 0.0  # 0 fully retracted … 1 the panel formed
     transcript: list[ChatLine] = field(default_factory=list)
+    draft: str = ""  # Tomo's reply as it's being written
+    revealing: int | None = None  # the line of Tomo's reply still appearing (None: the draft, if any)
+    revealed: float = 0.0  # how many characters of it (or of the draft) are out
+    allowed: int | None = None  # how far it may go yet, in step with the voice (None: all of it)…
+    pace: float = 0.0  # …and how fast, characters a second (0: the usual pace)
     chats: list[ChatInfo] = field(default_factory=list)  # the history, the latest first
     current_chat: str = ""  # the one showing
     history_open: bool = False  # the list of chats is out
@@ -542,14 +557,41 @@ class ChatState:
                 loco.jump()
                 if self.phase == Phase.CLOSED:
                     self.start_opening(loco)
+        elif isinstance(event, events.RevealTo):
+            self.allowed = event.upto
+            if event.upto is None:
+                self.pace = 0.0
+            else:  # all the way there, from wherever it has got to, as the voice gets there
+                waiting = max(0.0, event.upto - self.revealed)
+                self.pace = waiting / event.seconds if event.seconds > 0 else float("inf")
+        elif isinstance(event, events.ChatDraft):
+            if not event.text:  # that try was dropped: the next starts from nothing
+                self.revealed = 0.0
+            self.draft = event.text
+            self.scroll_to_end = True
         elif isinstance(event, events.Chat):
+            if event.line.role == Role.ASSISTANT:
+                # The reply takes the draft's place and carries on appearing
+                # from where the draft had got to (as far as they agree).
+                if self.revealing is not None:
+                    self.revealed = 0.0  # a reply that came before it ended: it's out whole
+                agreed = len(os.path.commonprefix([self.draft, event.line.text]))
+                self.revealed = min(self.revealed, agreed)
+                self.draft = ""
+                self.revealing = len(self.transcript)
+            if event.line.role == Role.USER:  # a new turn: nothing to wait for yet
+                self.allowed, self.pace = None, 0.0
             self.transcript.append(event.line)
             if (extra := len(self.transcript) - TRANSCRIPT_LIMIT) > 0:
                 del self.transcript[:extra]
                 self.selection.lines_dropped(extra)
+                if self.revealing is not None:
+                    self.revealing = self.revealing - extra if self.revealing >= extra else None
             self.scroll_to_end = True
         elif isinstance(event, events.Transcript):  # another chat (a new one: empty)
             self.transcript = list(event.lines[-TRANSCRIPT_LIMIT:])
+            self.draft, self.revealing, self.revealed = "", None, 0.0
+            self.allowed, self.pace = None, 0.0
             self.selection.clear()
             self.copied_line = None
             self.scroll_to_end = True
@@ -626,7 +668,30 @@ class ChatState:
                 self.liquid_t, self.phase = 0.0, Phase.CLOSED
                 if loco is not None:
                     loco.held = False  # back to wandering
-        return self.phase in (Phase.SLIDING, Phase.LIQUID, Phase.CLOSING)
+        return self.reveal(dt) or self.phase in (Phase.SLIDING, Phase.LIQUID, Phase.CLOSING)
+
+    def reveal(self, dt: float) -> bool:
+        """Bring more of Tomo's reply out. True while some of it is still to come."""
+        target = self.transcript[self.revealing].text if self.revealing is not None else self.draft
+        limit = len(target) if self.allowed is None else min(len(target), self.allowed)
+        waiting = limit - self.revealed
+        if waiting > 0:
+            rate = max(REVEAL_RATE, waiting / REVEAL_LAG) if self.allowed is None else self.pace or REVEAL_RATE
+            self.revealed = min(float(limit), self.revealed + rate * dt)
+            return True
+        if self.revealing is not None and self.revealed >= len(target):  # all of it is out
+            self.revealing, self.revealed = None, 0.0
+        return False
+
+    def visible(self, text: str) -> str:
+        """As much of ``text`` as is out, in whole words: it appears a word at
+        a time, each once it's reached (and no further than the voice)."""
+        limit = len(text) if self.allowed is None else min(len(text), self.allowed)
+        count = int(self.revealed)
+        if count >= limit:
+            return text[:limit]
+        cut = next((i for i in range(count, -1, -1) if text[i].isspace()), 0)
+        return text[:cut].rstrip()
 
     def shown(self) -> bool:
         """The panel (or the liquid) is on screen, taking the pointer."""
@@ -725,12 +790,19 @@ class ChatState:
         font = imgui.get_font_baked()
         self.placed, self.hovered = [], None
         for index, line in enumerate(self.transcript):
-            self.bubble(index, line, ui.thumbnails, font)
+            if index == self.revealing:  # still appearing: no selecting it yet
+                if words := self.visible(line.text):
+                    self.bubble(index, ChatLine(line.role, words, line.at_ms), None, font, live=True)
+            else:
+                self.bubble(index, line, ui.thumbnails, font)
+        drafted = self.visible(self.draft) if self.draft and self.revealing is None else ""
+        if drafted:
+            self.bubble(len(self.transcript), ChatLine(Role.ASSISTANT, drafted), None, font, live=True)
         if not self.transcript and not self.thinking:
             new_chat_note()
         if self.listening:
             imgui.text_colored(vec4(*ACCENT), "Listening…")
-        if self.thinking:
+        if self.thinking and not drafted:
             imgui.text_colored(vec4(150, 150, 150), "Tomo is thinking…")
         self.select_text()
         # Not while words are being selected: that scrolls by itself.
@@ -1011,11 +1083,12 @@ class ChatState:
 
     # ---- the conversation ----------------------------------------------------------------------
 
-    def bubble(self, index: int, line: ChatLine, thumbnails, font) -> None:
+    def bubble(self, index: int, line: ChatLine, thumbnails, font, live: bool = False) -> None:
         """One line of the conversation: the user's on the right, Tomo's on the
         left, notes in the middle — its pictures, if any, above its words,
         and who said it below, with a copy button while the pointer is on it.
-        ``font``: ImGui's current one, baked for its size."""
+        ``font``: ImGui's current one, baked for its size. ``live``: a reply
+        still being written, which can't be selected or copied yet."""
         color, who = BUBBLES.get(line.role, BUBBLES[Role.SYSTEM])
         avail = imgui.get_content_region_avail().x
         pad_x, pad_y = 10.0, 6.0
@@ -1037,19 +1110,24 @@ class ChatState:
             place(w)
             top = imgui.get_cursor_screen_pos()
             words = Placed(index, top.x + pad_x, top.y + pad_y, rows)
-            self.placed.append(words)
+            if not live:
+                self.placed.append(words)
             corner = imgui.ImVec2(top.x + w, top.y + h)
             if imgui.is_rect_visible(top, corner):
                 painter = imgui.get_window_draw_list()
                 painter.add_rect_filled(top, corner, rgba(*color), 12.0)
                 self.paint_words(painter, words, line.text, row_h)
             imgui.invisible_button(f"##words-{index}", imgui.ImVec2(w, h))
-            if imgui.is_item_hovered():
+            if imgui.is_item_hovered() and not live:
                 imgui.set_mouse_cursor(imgui.MouseCursor_.text_input.value)
-            if imgui.is_item_activated():
+            if imgui.is_item_activated() and not live:
                 self.press(words, line.text, row_h)
             imgui.set_cursor_screen_pos(imgui.ImVec2(top.x, top.y + h + 2.0))
             imgui.dummy(imgui.ImVec2(0.0, 0.0))
+        if live:
+            imgui.text_colored(vec4(120, 120, 120), who)
+            imgui.dummy(imgui.ImVec2(0.0, 4.0))
+            return
         mouse_y = imgui.get_io().mouse_pos.y
         if imgui.is_window_hovered() and top_y <= mouse_y < imgui.get_cursor_screen_pos().y + row_h:
             self.hovered = index

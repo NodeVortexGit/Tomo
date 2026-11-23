@@ -16,16 +16,18 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 DEFAULT_PERSONA = "Tomo"
-# The voices, all BgTTS cloned from the model's own samples: the character's
-# own, male or female, in English and in Bulgarian (see speech.py).
-DEFAULT_VOICE_MALE = "bgtts-male-en"
-DEFAULT_VOICE_FEMALE = "bgtts-female-en"
+# The English voices: the character's own, male or female (see speech.py).
+DEFAULT_VOICE_MALE = "en_GB-alan-medium"
+DEFAULT_VOICE_FEMALE = "en_GB-cori-medium"
+# Piper's only Bulgarian voice so far, for every character.
 DEFAULT_VOICE_BG_MALE = "bgtts-male"
 DEFAULT_VOICE_BG_FEMALE = "bgtts-female"
 # Enough for the persona, the tools and a recent stretch of conversation.
 DEFAULT_CONTEXT = 8192
 # How long Ollama keeps the model loaded between replies.
 DEFAULT_KEEP_ALIVE = "1h"
+# The small Bulgarian model that proofreads Tomo's Bulgarian (grammar.py), on the CPU.
+DEFAULT_GRAMMAR_MODEL = "hf.co/INSAIT-Institute/BgGPT-Gemma-3-4B-IT-GGUF:Q4_K_M"
 
 
 class LlmProvider(Enum):
@@ -64,6 +66,7 @@ class Config:
     tts_voice_female: str = DEFAULT_VOICE_FEMALE
     tts_voice_bg_male: str = DEFAULT_VOICE_BG_MALE
     tts_voice_bg_female: str = DEFAULT_VOICE_BG_FEMALE
+    tts_speed: float = 1.0
     # ---- character / persona -------------------------------------------------
     persona_name: str = DEFAULT_PERSONA
     character_path: Path = Path()
@@ -79,6 +82,10 @@ class Config:
     # Opening and closing apps (and clicking) with the mouse where the user
     # can watch: she picks the cursor up and carries it. Off: out of sight.
     use_mouse: bool = True
+    # Proofreading Tomo's Bulgarian before it's shown or spoken (grammar.py),
+    # and the model that fixes what the rules and the dictionary flag ("": none).
+    grammar: bool = True
+    grammar_model: str = DEFAULT_GRAMMAR_MODEL
     wake_word: bool = True
     # How memories are embedded for search: "ngram" (built in, offline,
     # language-independent) or "minilm" (ChromaDB's stock English model).
@@ -121,6 +128,7 @@ class Config:
                 log.warning("TOMO_LLM=%r isn't one of auto, ollama, lmstudio, openai; using auto", value)
             else:
                 provider = parsed
+        speed = env_float("TOMO_TTS_SPEED", 1.0)
         return cls(
             llm_provider=provider,
             llm_url=env_str("TOMO_LLM_URL") or "",
@@ -129,10 +137,11 @@ class Config:
             llm_context=int(env_float("TOMO_LLM_CONTEXT", DEFAULT_CONTEXT)),
             llm_think=env_bool("TOMO_LLM_THINK", False),
             llm_keep_alive=env_str("TOMO_LLM_KEEP_ALIVE") or DEFAULT_KEEP_ALIVE,
-            tts_voice_male=bgtts_voice("TOMO_TTS_VOICE_MALE", DEFAULT_VOICE_MALE),
-            tts_voice_female=bgtts_voice("TOMO_TTS_VOICE_FEMALE", DEFAULT_VOICE_FEMALE),
-            tts_voice_bg_male=bgtts_voice("TOMO_TTS_VOICE_BG_MALE", DEFAULT_VOICE_BG_MALE),
-            tts_voice_bg_female=bgtts_voice("TOMO_TTS_VOICE_BG_FEMALE", DEFAULT_VOICE_BG_FEMALE),
+            tts_voice_male=env_str("TOMO_TTS_VOICE_MALE") or DEFAULT_VOICE_MALE,
+            tts_voice_female=env_str("TOMO_TTS_VOICE_FEMALE") or DEFAULT_VOICE_FEMALE,
+            tts_voice_bg_male=env_str("TOMO_TTS_VOICE_BG_MALE") or DEFAULT_VOICE_BG_MALE,
+            tts_voice_bg_female=env_str("TOMO_TTS_VOICE_BG_FEMALE") or DEFAULT_VOICE_BG_FEMALE,
+            tts_speed=speed if 0.1 < speed < 5.0 else 1.0,
             persona_name=env_str("TOMO_PERSONA") or DEFAULT_PERSONA,
             character_path=character or data_dir / "characters" / "default.vrm",
             data_dir=data_dir,
@@ -145,6 +154,8 @@ class Config:
             ],
             allow_screen=env_bool("TOMO_ALLOW_SCREEN", True),
             use_mouse=env_bool("TOMO_USE_MOUSE", True),
+            grammar=env_bool("TOMO_GRAMMAR", True),
+            grammar_model=env_str("TOMO_GRAMMAR_MODEL") or DEFAULT_GRAMMAR_MODEL,
             wake_word=env_bool("TOMO_WAKE_WORD", True),
             embeddings=(env_str("TOMO_EMBEDDINGS") or "ngram").lower(),
         )
@@ -163,6 +174,7 @@ class Config:
             assets_dir=root / "assets",
             allow_command_execution=False,
             allow_screen=False,
+            grammar=False,
             wake_word=False,
         )
 
@@ -214,13 +226,3 @@ def env_float(key: str, default: float) -> float:
         return float(value) if value is not None else default
     except ValueError:
         return default
-
-
-def bgtts_voice(key: str, default: str) -> str:
-    """A voice setting. Only BgTTS voices speak now: an older .env's Piper
-    voice (en_GB-alan-medium…) gives way to the default."""
-    value = env_str(key)
-    if value and not value.startswith("bgtts-"):
-        log.warning("%s=%s isn't a BgTTS voice; using %s", key, value, default)
-        value = ""
-    return value or default

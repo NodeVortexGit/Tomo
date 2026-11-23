@@ -156,6 +156,25 @@ class Chat:
 
 
 @dataclass(frozen=True)
+class ChatDraft:
+    """Tomo's reply as it's being written ("": none, or that try was dropped).
+    The reply itself follows as a Chat line, which takes the draft's place."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class RevealTo:
+    """Keep Tomo's reply (the draft, or the reply itself) in step with the
+    voice: show up to character ``upto``, reaching it in ``seconds`` — the
+    time the voice takes to say it (0: at once). None: all of it, at the
+    usual pace (no voice to wait for)."""
+
+    upto: int | None
+    seconds: float = 0.0
+
+
+@dataclass(frozen=True)
 class Transcript:
     """The chat showing now, from its start (a new chat: empty)."""
 
@@ -266,6 +285,6 @@ class Pose:
 
 
 BrainToUi = (
-    Chat | Transcript | ChatList | ChatSize | Emote | WalkTo | Carry | Hide | ControlMode | Animate | Thinking | Listening
+    Chat | ChatDraft | RevealTo | Transcript | ChatList | ChatSize | Emote | WalkTo | Carry | Hide | ControlMode | Animate | Thinking | Listening
     | Speaking | LoadCharacter | Characters | Status | HealthLock | HealthProgress | Pose
 )

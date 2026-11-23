@@ -286,7 +286,8 @@ class App:
         elif isinstance(event, (events.Thinking, events.Listening, events.Chat)):
             self.animator.cue(event)
             self.chat.receive(event, loco)
-        elif isinstance(event, (events.Characters, events.Transcript, events.ChatList)):
+        elif isinstance(event, (events.Characters, events.ChatDraft, events.RevealTo, events.Transcript,
+                                events.ChatList, events.ChatSize)):
             self.chat.receive(event, loco)
         elif isinstance(event, events.Hide):
             self.corner.wanted = self.chat.hidden = event.on

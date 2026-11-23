@@ -22,6 +22,9 @@
     (от него BgTTS получава звука; ~500 MB; MIT; фиксирана версия)
   WavLM base+                          → <данни>/models/torch
     (MioCodec го изисква при зареждане; ~360 MB, тегли го torchaudio)
+  речникът bg_BG (Hunspell)            → <данни>/models/hunspell/bg_BG.aff, .dic
+    (за проверката на българския — grammar.py; LibreOffice/bgOffice, GPL-2.0,
+     фиксирана версия; ~2 MB)
   MediaPipe Pose Lite                  → <данни>/models/pose_landmarker_lite.task
     (ставите, за здравната програма)
 <данни> е същата папка като на приложението, освен ако --data-dir или

@@ -1,13 +1,14 @@
 """Speech out, on this computer: Tomo's replies become a voice.
 
-One helper, ``scripts/tts_bgtts.py`` (BgTTS-38M-V2), started once and kept
-running, loads all four voices once and then turns each line it's sent into
-a WAV file. :meth:`Speech.voice_for` picks the voice by the reply's language
-and by the showing character: the male voice, in English or in Bulgarian,
-for a male character, the female one for a female character (the model
-chooses which a character is: see characters.py). The voices are cloned from
-the model's own English and Bulgarian samples. BgTTS can't read digits, so
-numbers become words first, in the reply's language. Playback uses what the system has: Windows' own sound player, PipeWire /
+Two helpers, started once and kept running, each load their voices once and
+then turn each line they're sent into a WAV file: ``scripts/tts_piper.py``
+(Piper) for English and ``scripts/tts_bgtts.py`` (BgTTS-38M-V2) for Bulgarian.
+:meth:`Speech.voice_for` picks the voice by the reply's language and by the
+showing character: Alan or the BgTTS male voice for a male character, Cori or
+the BgTTS female voice for a female one (the model chooses which a character
+is: see characters.py). A reply is spoken as it's written (:class:`SpeechStream`):
+a sentence at a time, the next one made while one plays, and played without
+a gap between them. Playback uses what the system has: Windows' own sound player, PipeWire /
 PulseAudio / ALSA players on Linux, ``afplay`` on macOS. (Speech *in* is the
 listener in wake.py.)
 """
@@ -20,6 +21,7 @@ import json
 import logging
 import os
 import re
+import wave
 from pathlib import Path
 from typing import Callable
 
@@ -30,7 +32,8 @@ from .language import Language
 log = logging.getLogger(__name__)
 
 START_TIMEOUT = 180.0  # loading a voice the first time can mean downloading it
-SPEAK_TIMEOUT = 180.0  # BgTTS takes about a third of the time the speech lasts, more while the model thinks
+SPEAK_TIMEOUT = 60.0
+BG_SPEAK_TIMEOUT = 180.0  # BgTTS takes about a third of the time the speech lasts, more while the model thinks
 
 
 class Helper:
@@ -103,19 +106,23 @@ class Speech:
         self.voice_bg_female = cfg.tts_voice_bg_female
         # The showing character's voice, "male" or "female" (characters.voice_of).
         self.gender = gender or (lambda: "")
+        self.speed = cfg.tts_speed
         # All the voices at once: switching characters, or languages, never
         # waits for a voice to load.
-        voices = (self.voice_female, self.voice_male, self.voice_bg_female, self.voice_bg_male)
+        self.piper = Helper(self.python, cfg.scripts_dir / "tts_piper.py",
+                            ["--voice", self.voice_female, "--voice", self.voice_male,
+                             "--voices-dir", str(cfg.data_dir / "voices")], SPEAK_TIMEOUT)
         self.bgtts = Helper(self.python, cfg.scripts_dir / "tts_bgtts.py",
-                            [*(arg for v in voices for arg in ("--voice", v)),
-                             "--models-dir", str(cfg.data_dir / "models")], SPEAK_TIMEOUT)
+                            ["--voice", self.voice_bg_female, "--voice", self.voice_bg_male,
+                             "--models-dir", str(cfg.data_dir / "models")], BG_SPEAK_TIMEOUT)
         self._count = itertools.count()
         self._told_broken = False
+        self._stream: SpeechStream | None = None
 
     def voice_for(self, text: str) -> str:
-        """The voice for a line, by its language and the character: the male
-        one if the character's male, otherwise the female one (also while its
-        voice isn't chosen yet)."""
+        """The voice for a line, by its language and the character: male
+        (BgTTS or Alan) if the character's male, otherwise female (BgTTS or
+        Cori), also while its voice isn't chosen yet."""
         if Language.of(text) == Language.BULGARIAN:
             if self.gender() == "male":
                 return self.voice_bg_male
@@ -127,22 +134,34 @@ class Speech:
             return self.voice_female
 
     async def warm_up(self) -> None:
-        """Start the helper now, as Tomo appears: loading the voices takes
+        """Start the helpers now, as Tomo appears: loading the voices takes
         a few seconds, which the first reply would otherwise wait for."""
-        await self.bgtts.warm_up()
+        await asyncio.gather(self.piper.warm_up(), self.bgtts.warm_up())
 
-    async def synthesize(self, text: str) -> Path:
-        """Turn ``text`` into a WAV file for :meth:`play`. Markdown and emoji
-        are left out of the voice (see :func:`speakable`)."""
+    async def synthesize(self, text: str, voice: str | None = None) -> Path:
+        """Turn ``text`` into a WAV file for :meth:`play`, in ``voice`` (None:
+        :meth:`voice_for` picks it). Markdown and emoji are left out of the
+        voice (see :func:`speakable`)."""
         text = speakable(text)
         if not text:
             raise RuntimeError("nothing to say out loud")
         out = self.cache_dir / f"speech-{next(self._count)}.wav"
-        voice = self.voice_for(text)
-        bulgarian = voice in (self.voice_bg_male, self.voice_bg_female)
-        said = numbers_in_bulgarian(text) if bulgarian else numbers_in_english(text)
-        await self.bgtts.ask({"text": said, "out": str(out), "voice": voice})
+        voice = voice or self.voice_for(text)
+        if voice in (self.voice_bg_male, self.voice_bg_female):
+            # BgTTS has no speed setting.
+            await self.bgtts.ask({"text": numbers_in_bulgarian(text), "out": str(out), "voice": voice})
+        else:
+            await self.piper.ask({"text": text, "out": str(out), "speed": self.speed, "voice": voice})
         return out
+
+    def stream(self, speaking: Callable[[bool], None],
+               heard: Callable[[object, float], None] | None = None) -> SpeechStream:
+        """A reply's speech, a sentence at a time (see :class:`SpeechStream`).
+        A new one stops the one before, if it's still talking."""
+        if self._stream is not None:
+            self._stream.cancel()
+        self._stream = SpeechStream(self, speaking, heard=heard)
+        return self._stream
 
     async def play(self, audio: Path) -> None:
         """Play synthesized speech, then delete it. Returns once it ends."""
@@ -173,6 +192,180 @@ def _helper_reply(line: bytes) -> None:
         raise RuntimeError("the voice helper said something odd") from e
     if reply.get("error"):
         raise RuntimeError(reply["error"])
+
+
+class SpeechStream:
+    """One reply's speech while it's being written: :meth:`add` each piece
+    (see :func:`speech_ends`) as it's ready, then :meth:`close`. The voice is
+    the one for the first piece, for the whole reply. Pieces are made in
+    order while the one before plays, and played back to back without a gap
+    (:class:`Player`). ``speaking(True)`` as the first starts, ``(False)``
+    after the last — or when it's cancelled. ``heard(tag, seconds)`` as each
+    piece starts to sound, with the ``tag`` it was added with and how long it
+    lasts (0: a piece that couldn't be made, at the moment it would have
+    played)."""
+
+    def __init__(self, speech: Speech, speaking: Callable[[bool], None], player: Callable[[], Player] | None = None,
+                 heard: Callable[[object, float], None] | None = None) -> None:
+        self.speech, self.speaking = speech, speaking
+        self.heard = heard or (lambda tag, seconds: None)
+        self.voice: str | None = None
+        self.player = (player or Player)()
+        self.texts: asyncio.Queue = asyncio.Queue()
+        self.sounds: asyncio.Queue = asyncio.Queue()
+        self.failed: Exception | None = None  # the first piece that couldn't be made
+        loop = asyncio.get_running_loop()
+        self.tasks = [loop.create_task(self._make()), loop.create_task(self._play())]
+
+    def add(self, text: str, tag: object = None) -> None:
+        text = speakable(text)
+        if not text:
+            return
+        if self.voice is None:
+            self.voice = self.speech.voice_for(text)
+        self.texts.put_nowait((text, tag))
+
+    def close(self) -> None:
+        """Nothing more to say: it ends once what's queued has been played."""
+        self.texts.put_nowait(None)
+
+    def cancel(self) -> None:
+        self.player.abort()
+        for task in self.tasks:
+            task.cancel()
+
+    async def done(self) -> None:
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+
+    async def _make(self) -> None:
+        while (item := await self.texts.get()) is not None:
+            text, tag = item
+            try:
+                self.sounds.put_nowait((await self.speech.synthesize(text, self.voice), tag))
+            except Exception as e:  # noqa: BLE001 - the rest may still work
+                log.warning("tts failed: %s", e)
+                self.failed = self.failed or e
+                self.sounds.put_nowait((None, tag))
+        self.sounds.put_nowait(None)
+
+    async def _play(self) -> None:
+        started = False
+        try:
+            while (item := await self.sounds.get()) is not None:
+                audio, tag = item
+                if audio is None:  # couldn't be made: its words needn't wait for it
+                    self.heard(tag, 0.0)
+                    continue
+                if not started:
+                    started = True
+                    self.speaking(True)
+                self.heard(tag, wav_seconds(audio))
+                try:
+                    await asyncio.to_thread(self.player.play, audio)
+                except Exception as e:  # noqa: BLE001
+                    log.debug("tts playback failed: %s", e)
+                finally:
+                    try:
+                        os.remove(audio)
+                    except OSError:
+                        pass
+            await asyncio.to_thread(self.player.close)
+        finally:
+            if started:
+                self.speaking(False)
+
+
+class Player:
+    """Plays one WAV after another without a gap: where ``sounddevice`` is
+    (Windows, macOS), into one output stream that stays open between them;
+    elsewhere, each file on its own (:func:`play_wav`)."""
+
+    def __init__(self) -> None:
+        self.output = None
+        self.rate = self.channels = 0
+        self.stopped = False
+
+    def play(self, path: Path) -> None:
+        if self.stopped:
+            return
+        try:
+            import numpy as np
+            import sounddevice
+        except ImportError:
+            return play_wav(path)
+        with wave.open(str(path)) as w:
+            rate, channels, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
+            frames = w.readframes(w.getnframes())
+        if width != 2:
+            return play_wav(path)
+        samples = np.frombuffer(frames, dtype=np.int16).reshape(-1, channels)
+        if self.output is None or (rate, channels) != (self.rate, self.channels):
+            self.close()
+            self.output = sounddevice.OutputStream(samplerate=rate, channels=channels, dtype="int16")
+            self.output.start()
+            self.rate, self.channels = rate, channels
+        self.output.write(samples)  # returns once it's in the stream's buffer: the next follows on at once
+
+    def close(self) -> None:
+        """Let what's written play out, then release the device."""
+        output, self.output = self.output, None
+        if output is not None:
+            output.stop()
+            output.close()
+
+    def abort(self) -> None:
+        """Stop at once (a new reply's speech takes over)."""
+        self.stopped = True
+        output = self.output
+        if output is not None:
+            try:
+                output.abort()
+            except Exception:  # noqa: BLE001 - it's going anyway
+                pass
+
+
+def wav_seconds(path: Path) -> float:
+    """How long a WAV file lasts (0 if it can't be read)."""
+    try:
+        with wave.open(str(path)) as w:
+            return w.getnframes() / w.getframerate()
+    except (OSError, EOFError, wave.Error, ZeroDivisionError):
+        return 0.0
+
+
+SENTENCE_END = re.compile(r"[.!?…]+[\"'»“”)]*(?=\s)|\n")
+FIRST_WORDS = 6  # the first piece may end at a comma after this many words, so the voice (and the words) start sooner…
+LONG_WORDS = 25  # …and a long sentence at one after this many, so a piece is never long to make
+
+
+def speech_ends(text: str, start: int = 0, first: bool = False) -> list[int]:
+    """Where the next pieces to speak end in ``text`` (after ``start``): at
+    the end of each sentence that's complete — followed by a space, so "3.5"
+    and a sentence still being written don't count — or at a line break; and
+    at a comma once a piece is long (FIRST_WORDS for the reply's first piece,
+    LONG_WORDS after), so speaking needn't wait for its end."""
+    ends, at = [], start
+    while True:
+        limit = FIRST_WORDS if first and not ends else LONG_WORDS
+        match = SENTENCE_END.search(text, at)
+        stop = match.end() if match else len(text)
+        piece = text[at:stop]
+        comma = None
+        if len(piece.split()) > limit:
+            # The first comma after enough words, with more of the sentence written after it.
+            for found in re.finditer(r",(?=\s)", piece):
+                if len(piece[:found.end()].split()) >= limit and piece[found.end():].strip():
+                    comma = at + found.end()
+                    break
+        if comma is not None:
+            ends.append(comma)
+            at = comma
+            continue
+        if match is None:
+            return ends
+        if text[at:match.end()].strip():
+            ends.append(match.end())
+        at = match.end()
 
 
 def play_wav(path: Path) -> None:
@@ -318,68 +511,3 @@ def _as_number(digits: str, noun: str = "") -> str:
     if len(digits) > 9 or (len(digits) > 1 and digits.startswith("0")):
         return " ".join(UNITS[int(d)] for d in digits)
     return number_words(int(digits), noun)
-
-
-EN_ONES = ("zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
-           "seventeen eighteen nineteen").split()
-EN_TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
-EN_NUMBER = re.compile(r"(?<![\w.,:])(\d{1,2}):(\d{2})(?!\d)"
-                       r"|(?<![\w.,:])(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+)(?![.,]?\d))?(st|nd|rd|th)?(?!\w)(\s*%)?")
-
-
-def english_words(n: int) -> str:
-    """A whole number below a billion, in English words."""
-    if n >= 1_000_000:
-        rest = n % 1_000_000
-        return f"{english_words(n // 1_000_000)} million" + (f" {english_words(rest)}" if rest else "")
-    if n >= 1000:
-        rest = n % 1000
-        return f"{english_words(n // 1000)} thousand" + (f" {english_words(rest)}" if rest else "")
-    if n >= 100:
-        rest = n % 100
-        return f"{EN_ONES[n // 100]} hundred" + (f" {english_words(rest)}" if rest else "")
-    if n >= 20:
-        return EN_TENS[n // 10] + (f"-{EN_ONES[n % 10]}" if n % 10 else "")
-    return EN_ONES[n]
-
-
-def ordinal(words: str) -> str:
-    """"twenty-one" → "twenty-first"."""
-    special = {"one": "first", "two": "second", "three": "third", "five": "fifth", "eight": "eighth",
-               "nine": "ninth", "twelve": "twelfth"}
-    head, last = re.match(r"(.*?)([a-z]+)$", words).groups()
-    if last in special:
-        return head + special[last]
-    return head + (last[:-1] + "ieth" if last.endswith("y") else last + "th")
-
-
-def numbers_in_english(text: str) -> str:
-    """Digits as English words, as numbers_in_bulgarian does for Bulgarian:
-    40% → forty percent, 15:30 → fifteen thirty, 3.5 → three point five,
-    2nd → second, 1,250 → one thousand two hundred fifty."""
-
-    def spoken(match: re.Match) -> str:
-        hours, minutes, whole, part, suffix, percent = match.groups()
-        if hours is not None:
-            hour = english_words(int(hours))
-            if minutes == "00":
-                return f"{hour} o'clock"
-            if minutes.startswith("0"):
-                return f"{hour} oh {EN_ONES[int(minutes[1])]}"
-            return f"{hour} {english_words(int(minutes))}"
-        said = _as_english(whole.replace(",", ""))
-        if suffix and part is None:
-            said = ordinal(said)
-        if part is not None:
-            said += " point " + " ".join(EN_ONES[int(d)] for d in part)
-        return said + (" percent" if percent else "")
-
-    # Whatever's left: v2, the parts of a date.
-    text = re.sub(r"\d+", lambda m: f" {_as_english(m.group())} ", EN_NUMBER.sub(spoken, text))
-    return re.sub(r" +([.,!?;:)])", r"\1", re.sub(r" {2,}", " ", text)).strip()
-
-
-def _as_english(digits: str) -> str:
-    if len(digits) > 9 or (len(digits) > 1 and digits.startswith("0")):
-        return " ".join(EN_ONES[int(d)] for d in digits)
-    return english_words(int(digits))

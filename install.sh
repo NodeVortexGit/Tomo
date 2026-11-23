@@ -8,7 +8,7 @@
 #      dialog, clipboard tools (to paste pictures into the chat), xdotool (for
 #      the mouse/keyboard control)
 #    • Tomo's Python environment (.venv, with uv if it's there, else venv+pip)
-#    • the speech and camera models (BgTTS, Vosk, Parakeet, Pose Lite)
+#    • the speech and camera models (Piper voices, BgTTS, Vosk, Parakeet, Pose Lite)
 #    • a .env from the template, and an entry in the app menu
 #    • a check for a local model server (Ollama or LM Studio), offering to
 #      download a model for Ollama
@@ -38,6 +38,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APPS_DIR="$HOME/.local/share/applications"
 DATA_DIR="${TOMO_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/tomo}"
 MODEL="${TOMO_MODEL:-gemma4:12b-it-qat}"
+PROOFREADER="${TOMO_GRAMMAR_MODEL:-hf.co/INSAIT-Institute/BgGPT-Gemma-3-4B-IT-GGUF:Q4_K_M}"
 VENV="$ROOT/.venv"
 
 hr
@@ -118,7 +119,8 @@ if command -v ollama >/dev/null 2>&1; then
         if [ -t 0 ]; then
             read -r -p "  Download $MODEL now (a few GB)? [y/N] " answer
             case "$answer" in
-                [yY]*) ollama pull "$MODEL" && ok "Model ready: $MODEL" ;;
+                [yY]*) ollama pull "$MODEL" && ok "Model ready: $MODEL"
+                       ollama pull "$PROOFREADER" && ok "Proofreading model ready: $PROOFREADER" ;;
                 *) warn "Later: ollama pull $MODEL" ;;
             esac
         else

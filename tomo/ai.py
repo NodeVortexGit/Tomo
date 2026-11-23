@@ -157,6 +157,8 @@ class Msg:
 
 
 Ui = Callable[[BrainToUi], None]
+# The reply so far, as it's written, and whether it may already be spoken.
+OnText = Callable[[str, bool], None]
 
 
 class AiClient:
@@ -188,11 +190,13 @@ class AiClient:
         """Her use of the mouse and keyboard, for this turn."""
         return Hands(ui, self.body, self.control_allowed, self.cfg.use_mouse)
 
-    async def respond(self, user_text: str, ui: Ui, images: tuple[Attachment, ...] = (), chat: str | None = None
-                      ) -> str:
+    async def respond(self, user_text: str, ui: Ui, images: tuple[Attachment, ...] = (), chat: str | None = None,
+                      on_text: OnText | None = None) -> str:
         """Reply to ``user_text`` (and the ``images`` sent with it), driving
         the body through ``ui`` on the way. The conversation so far is the
-        ``chat``'s (None: the latest lines, whichever chat)."""
+        ``chat``'s (None: the latest lines, whichever chat). ``on_text``: the
+        reply as it's being written (see :meth:`run_tool_loop`); without it,
+        the reply comes whole."""
         try:
             server = await self.server()
         except LookupError as problem:
@@ -212,7 +216,7 @@ class AiClient:
         try:
             # One model for the brain: kept even after an error — the next
             # turn asks it again (Ollama reloads a dropped model on its own).
-            return await self.run_tool_loop(server, messages, ui)
+            return await self.run_tool_loop(server, messages, ui, on_text)
         finally:
             ui(Thinking(False))
 
@@ -346,7 +350,8 @@ class AiClient:
         character = self.db.active_character()
         if character is not None:
             voice = character.voice if character.voice in characters.VOICES else "female"
-            ctx += f"\nYou appear as the 3D character “{character.name}”; your voice is {voice}.\n"
+            piper = self.cfg.tts_voice_male if voice == "male" else self.cfg.tts_voice_female
+            ctx += f"\nYou appear as the 3D character “{character.name}”; your English voice is {voice} ({piper}).\n"
         shell = platform.shell_name()
         shell_hint = (" It's Windows PowerShell 5.1: use built-in cmdlets (Get-CimInstance, not wmic)."
                       if platform.WINDOWS else "")
@@ -407,14 +412,33 @@ class AiClient:
 
     # ---- the tool loop ----------------------------------------------------------------
 
-    async def run_tool_loop(self, server: Server, messages: list[Msg], ui: Ui) -> str:
+    async def run_tool_loop(self, server: Server, messages: list[Msg], ui: Ui, on_text: OnText | None = None) -> str:
+        """The model's rounds: tools until it answers. With ``on_text``, each
+        round's text goes there as it's written, with whether it may already
+        be spoken — not while it only promises, nor while every action so far
+        has failed (the checks below may send it back) — and ("", False) when
+        the round turns out not to be the answer."""
         tools = self.tools()
         known = tool_names(tools)
         started = time.monotonic()
         reminded = checked = False
         worked = failed = 0
+
+        def writing(text: str) -> None:
+            hold = (not checked and failed > 0 and worked == 0) or (not reminded and only_promises(text))
+            on_text(text, not hold)
+
+        def withdraw() -> None:
+            if on_text is not None:
+                on_text("", False)
+
+        live = writing if on_text is not None else None
         for _ in range(MAX_TOOL_ROUNDS):
-            text, calls = await self.chat(server, messages, tools, known)
+            text, calls = await self.chat(server, messages, tools, known, live)
+            gestures_only = bool(text) and bool(calls) and all(c.name in GESTURES for c in calls)
+            if (calls and not gestures_only) or (not calls and not reminded and only_promises(text)) or (
+                    not calls and not checked and failed > 0 and worked == 0 and claims_success(text)):
+                withdraw()  # not the answer: tools to run, or one more try
             if not calls:
                 # "I'll open them now!" with nothing opened: once, act instead.
                 if not reminded and only_promises(text):
@@ -461,23 +485,24 @@ class AiClient:
         # Out of rounds: a plain wrap-up. The tools are still offered (unused),
         # which keeps the request's start as the server has it cached.
         messages.append(Msg("user", WRAP_UP))
-        text, _ = await self.chat(server, messages, tools, known)
+        text, _ = await self.chat(server, messages, tools, known, live)
         return text or "Sorry, I got a bit tangled up there."
 
-    async def chat(self, server: Server, messages: list[Msg], tools: list | None, known: list[str]
-                   ) -> tuple[str, list[ToolCall]]:
-        """One request; a model that can't take images gets it again without."""
+    async def chat(self, server: Server, messages: list[Msg], tools: list | None, known: list[str],
+                   on_text: Callable[[str], None] | None = None) -> tuple[str, list[ToolCall]]:
+        """One request; a model that can't take images gets it again without.
+        ``on_text``: the text so far, as it's written (see :func:`streamable`)."""
         try:
-            return await self._chat_once(server, messages, tools, known)
+            return await self._chat_once(server, messages, tools, known, on_text)
         except Exception as e:
             if not any(m.images for m in messages):
                 raise
             log.info("the model couldn't take the screenshot (%s); going on without it", e)
             blind = [without_images(m) for m in messages]
-            return await self._chat_once(server, blind, tools, known)
+            return await self._chat_once(server, blind, tools, known, on_text)
 
-    async def _chat_once(self, server: Server, messages: list[Msg], tools: list | None, known: list[str]
-                         ) -> tuple[str, list[ToolCall]]:
+    async def _chat_once(self, server: Server, messages: list[Msg], tools: list | None, known: list[str],
+                         on_text: Callable[[str], None] | None = None) -> tuple[str, list[ToolCall]]:
         if server.api == Api.OLLAMA:
             url = f"{server.url}/api/chat"
             body = ollama_request(server.model, messages, tools, self.cfg.llm_context, self.cfg.llm_think,
@@ -486,6 +511,10 @@ class AiClient:
             url = f"{server.url}/chat/completions"
             body = openai_request(server.model, messages, tools)
         headers = {"Authorization": f"Bearer {self.cfg.llm_api_key}"} if self.cfg.llm_api_key else {}
+        if on_text is not None:
+            body["stream"] = True
+            content, calls = await self._stream(url, body, headers, server.api, on_text)
+            return tidy(content, calls, known)
         try:
             response = await self.http.post(url, json=body, headers=headers)
         except httpx.HTTPError as e:
@@ -505,6 +534,76 @@ class AiClient:
         else:
             content, calls = parse_openai(reply)
         return tidy(content, calls, known)
+
+    async def _stream(self, url: str, body: dict, headers: dict, api: Api, on_text: Callable[[str], None]
+                      ) -> tuple[str, list[ToolCall]]:
+        """One request, read as it's written: Ollama's lines of JSON, or an
+        OpenAI-style server's events ("data: …"); a server that answers whole
+        anyway is read whole. The text so far goes to ``on_text`` whenever it
+        may be shown (see :func:`streamable`)."""
+        content, ollama_calls, openai_calls = "", [], {}
+
+        def took(delta: str) -> None:
+            nonlocal content
+            if delta:
+                content += delta
+                if (shown := streamable(content)) is not None:
+                    on_text(shown)
+
+        try:
+            async with self.http.stream("POST", url, json=body, headers=headers) as response:
+                if not response.is_success:
+                    await response.aread()
+                    raise RuntimeError(f"the model server said {response.status_code}: {truncate_err(response.text)}")
+                events = "event-stream" in response.headers.get("content-type", "")
+                if api != Api.OLLAMA and not events:  # not streamed after all: one JSON answer
+                    reply = json.loads(await response.aread())
+                    text, calls = parse_openai(reply)
+                    took(text)
+                    return text, calls
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if api == Api.OLLAMA:
+                        chunk = json.loads(line)
+                        if chunk.get("error"):
+                            raise RuntimeError(str(chunk["error"]))
+                        message = chunk.get("message") or {}
+                        ollama_calls += message.get("tool_calls") or []
+                        took(message.get("content") or "")
+                        if chunk.get("done"):
+                            log.debug("ollama: load %.1fs, read %s tokens in %.1fs, wrote %s in %.1fs",
+                                      chunk.get("load_duration", 0) / 1e9, chunk.get("prompt_eval_count"),
+                                      chunk.get("prompt_eval_duration", 0) / 1e9, chunk.get("eval_count"),
+                                      chunk.get("eval_duration", 0) / 1e9)
+                        continue
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        break
+                    chunk = json.loads(data)
+                    if chunk.get("error"):
+                        error = chunk["error"]
+                        raise RuntimeError(str(error.get("message") if isinstance(error, dict) else error))
+                    for choice in chunk.get("choices") or []:
+                        delta = choice.get("delta") or {}
+                        for call in delta.get("tool_calls") or []:
+                            got = openai_calls.setdefault(call.get("index", len(openai_calls)),
+                                                          {"id": "", "name": "", "arguments": ""})
+                            got["id"] = call.get("id") or got["id"]
+                            function = call.get("function") or {}
+                            got["name"] += function.get("name") or ""
+                            got["arguments"] += function.get("arguments") or ""
+                        took(delta.get("content") or "")
+        except httpx.HTTPError as e:
+            raise RuntimeError(f"the model server didn't answer: {e}") from e
+        except ValueError as e:  # json.JSONDecodeError among them
+            raise RuntimeError("couldn't read the model's answer") from e
+        calls = ollama_calls or [{"id": c["id"], "function": {"name": c["name"], "arguments": c["arguments"]}}
+                                 for _, c in sorted(openai_calls.items())]
+        return parse_message({"content": content, "tool_calls": calls})
 
     async def screenshot(self, find: str | None, ui: Ui) -> tuple[str, str]:
         """A screenshot for the model, announced in the chat (never silent)."""
@@ -535,7 +634,8 @@ class AiClient:
         finally:
             self._choosing.discard(name)
         if voice is not None and ui is not None:
-            ui(Chat(ChatLine(Role.SYSTEM, f"{name} speaks in a {voice} voice")))
+            piper = self.cfg.tts_voice_male if voice == "male" else self.cfg.tts_voice_female
+            ui(Chat(ChatLine(Role.SYSTEM, f"{name} speaks English in a {voice} voice ({piper})")))
         return voice
 
     async def choose_voice(self, name: str, path: Path) -> str | None:
@@ -1168,6 +1268,15 @@ def arguments(value: Any) -> dict:
     return {}
 
 
+def streamable(text: str) -> str | None:
+    """The reply so far as the user may see it while it's written; None while
+    it might hold what tidy() takes out — a tool call written into the text
+    (<tool_call>…, a JSON call), thinking notes (<think>…), or code."""
+    if any(mark in text for mark in ("<", "{", "```")):
+        return None
+    return text.strip() or None
+
+
 def tidy(text: str, calls: list[ToolCall], known: list[str]) -> tuple[str, list[ToolCall]]:
     """The reply as the user should see it, and the tool calls — including
     ones a model wrote into its text instead of the API's field."""
@@ -1235,8 +1344,8 @@ def tool_specs(allow_screen: bool,
                                                     DEFAULT_VOICE_BG_MALE, DEFAULT_VOICE_BG_FEMALE)
                ) -> list[dict]:
     """The tools, in the function format both APIs share. Kept short: the
-    model reads all of this every turn. ``voices``: the voices, male and
-    female in English and in Bulgarian, which set_voice chooses between."""
+    model reads all of this every turn. ``voices``: the Piper voices, male,
+    female and Bulgarian, which set_voice chooses between."""
 
     def function(name: str, description: str, properties: dict, required: list[str]) -> dict:
         return {"type": "function", "function": {"name": name, "description": description, "parameters": {

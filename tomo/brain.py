@@ -9,7 +9,10 @@ frame). Nothing the body does ever waits on the model.
 
 Single source of truth: the body does NOT add the user's own line to the
 chat. It sends the message; the brain echoes it back, then follows with the
-reply — so the chat, the memory and the model's context stay in step.
+reply — so the chat, the memory and the model's context stay in step. The
+reply shows (ChatDraft) and is spoken while it's being written
+(:class:`LiveReply`), each piece proofread first (grammar.py); the line kept
+is the finished reply, proofread.
 
 Chats: the brain keeps which one is showing. A new chat starts empty, and
 any chat in the history can be opened again to read or carry on, renamed or
@@ -37,11 +40,12 @@ from .apps import SystemCatalog
 from .commands import Executor
 from .config import Config
 from .db import Store
-from .events import (Animate, Attachment, BrainToUi, Characters, Chat, ChatSize, SetChatSize, ChatLine, ChatList, ControlMode, Hide, ImportCharacter,
+from .events import (Animate, Attachment, BrainToUi, Characters, Chat, ChatDraft, ChatSize, RevealTo, SetChatSize, ChatLine, ChatList, ControlMode, Hide, ImportCharacter,
                      DeleteChat, LoadCharacter, NewChat, OpenChat, PanicStop, RenameChat, Role, SetControlAllowed, SetHidden,
                      SetVoice, Shutdown,
                      Speaking, StartVoiceInput, Status, Transcript, UiToBrain, UserMessage, now_ms)
 from .hands import BodyState
+from .grammar import Grammar
 from .language import Language
 from .slash import Slash, is_command
 
@@ -136,6 +140,8 @@ async def run_loop(cfg: Config, inbox: asyncio.Queue, ui, body: BodyState | None
     # first question.
     asyncio.get_running_loop().create_task(ai.warm_up())
     asyncio.get_running_loop().create_task(speech.warm_up())
+    grammar = Grammar(cfg, ai.server)
+    asyncio.get_running_loop().create_task(grammar.warm_up())
     asyncio.get_running_loop().create_task(scan_catalog(db, catalog, ui))
 
     start = characters.startup(db, cfg)
@@ -188,7 +194,7 @@ async def run_loop(cfg: Config, inbox: asyncio.Queue, ui, body: BodyState | None
                 memory.talking = True
                 try:
                     await handle_user_text(db, ai, speech if voice_replies else None, wake, ui,
-                                           message.text.strip(), images, chat)
+                                           message.text.strip(), images, chat, grammar)
                 finally:
                     memory.talked()
                 ui(ChatList(tuple(db.list_chats()), chat))
@@ -296,29 +302,153 @@ def show_chat(db: Store, chat: str, ui) -> None:
 
 
 async def handle_user_text(db: Store, ai: AiClient, speech, wake, ui, text: str,
-                           images: tuple[Attachment, ...] = (), chat: str = "") -> None:
+                           images: tuple[Attachment, ...] = (), chat: str = "", grammar=None) -> None:
     """The core turn: echo the user's line (and images), get a reply, keep
     both in ``chat``, show and speak the reply (``speech`` None: the voice
-    is off)."""
+    is off). ``grammar``: proofreads the reply on the way (grammar.py);
+    what's shown, spoken and kept is the proofread reply."""
     # Echo now, but keep it only after the reply: the AI rebuilds its context
     # from the stored transcript and adds the current message itself.
     user_line = ChatLine(Role.USER, text, attachments=images)
     ui(Chat(user_line))
+    live = LiveReply(ui, speech, wake, grammar)
     try:
-        reply = (await ai.respond(text, ui, images, chat)).strip() or "…"
+        reply = (await ai.respond(text, ui, images, chat, live.text)).strip() or "…"
     except Exception as e:  # noqa: BLE001
         log.warning("ai error: %s", e)
         reply = f"Sorry — I hit a snag reaching my brain ({e})."
+    reply = await live.finish(reply)
     reply_line = ChatLine(Role.ASSISTANT, reply)
     db.add_message(user_line, chat)
     db.add_message(reply_line, chat)
     ui(Chat(reply_line))
-    # Speak in the background, with the wake word muted so Tomo's own voice
-    # can't trigger it. Nothing to say (only emoji) isn't a broken voice.
-    if speech is None or not speech_mod.speakable(reply):
-        return
+    live.end_voice()
 
-    speak(speech, wake, ui, reply)
+
+class LiveReply:
+    """A reply while it's being written (AiClient.respond's ``on_text``).
+    It's cut into pieces (speech.speech_ends) as they're complete; each is
+    proofread (``grammar``, grammar.py), then shown in the chat as a draft
+    and — with the voice on (``speech``) — spoken, once the model may be
+    heard (see AiClient.run_tool_loop), the wake word muted meanwhile so
+    Tomo's own voice can't trigger it. Pieces are proofread in order, the
+    next while the one before is spoken. :meth:`finish`, with the reply as
+    kept, does the rest and gives back the reply proofread.
+
+    With the voice on, the words appear as they're spoken: the reply is held
+    back (RevealTo) and each piece's words come out while the voice says them.
+    Whatever isn't spoken — the voice failed, or nothing more to say — is let
+    out once the voice is done. Only the newest reply holds or lets go: the
+    one before may still be stopping."""
+
+    current: LiveReply | None = None  # the newest reply
+
+    def __init__(self, ui, speech, wake, grammar=None) -> None:
+        self.ui, self.speech, self.wake, self.grammar = ui, speech, wake, grammar
+        self.tries = 0  # the model's tries so far: a piece knows which one it's from
+        self.raw = ""  # the current try's text, as the model writes it
+        self.cut = 0  # how much of it has been cut into pieces
+        self.shown = ""  # its pieces, proofread: what the chat shows and the voice says
+        self.unsaid: list[tuple[str, int]] = []  # proofread pieces held back from the voice, and where they end
+        self.may_speak = False  # whether the current try may be heard yet
+        self.pieces = 0  # pieces in all: the first may be shorter
+        self.held = False  # its words wait for the voice
+        self.stream = None
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.worker = asyncio.get_running_loop().create_task(self._proofread())
+        LiveReply.current = self
+
+    def text(self, text: str, speak: bool) -> None:
+        if not text:  # that try wasn't the answer: what it said stays said
+            self.tries += 1
+            self.raw, self.cut, self.shown, self.unsaid = "", 0, "", []
+            self.ui(ChatDraft(""))
+            if self.held:
+                self.ui(RevealTo(0))  # the next try's words wait for the voice too
+            return
+        if self.speech is not None and not self.held:
+            self.held = True
+            self.ui(RevealTo(0))
+        self.raw, self.may_speak = text, speak
+        self._cut(text, speech_mod.speech_ends(text, self.cut, first=self.pieces == 0))
+
+    async def finish(self, reply: str) -> str:
+        """The reply as the model left it, proofread to its end (the pieces
+        still to do, done); returns it as it's to be kept."""
+        if not reply.startswith(self.raw[:self.cut]):
+            self.text("", False)  # the reply isn't the try that was shown: show it afresh
+        # It's the answer now: what was held back may be said, and the rest as it's proofread.
+        for piece, end in self.unsaid:
+            self._say(piece, end)
+        self.unsaid = []
+        self.raw, self.may_speak = reply, True
+        self._cut(reply, [min(end, len(reply)) for end in
+                          speech_mod.speech_ends(reply + "\n", self.cut, first=self.pieces == 0)])
+        self.queue.put_nowait(None)
+        await self.worker
+        return self.shown.strip() or reply
+
+    def end_voice(self) -> None:
+        """Once the reply is kept: the voice ends after what's queued."""
+        if self.stream is not None:
+            self.stream.close()
+            asyncio.get_running_loop().create_task(self._told(self.stream))
+        elif self.held:
+            self._let_go()  # nothing was spoken: nothing to wait for
+
+    def _cut(self, text: str, ends: list[int]) -> None:
+        for end in ends:
+            if end > self.cut:
+                self.queue.put_nowait((self.tries, text[self.cut:end]))
+                self.cut = end
+                self.pieces += 1
+
+    async def _proofread(self) -> None:
+        while (item := await self.queue.get()) is not None:
+            tries, piece = item
+            fixed = await self.grammar.fix(piece) if self.grammar is not None else piece
+            if tries != self.tries:
+                continue  # that try was dropped meanwhile
+            self.shown += fixed
+            self.ui(ChatDraft(self.shown))
+            if self.speech is not None and speech_mod.speakable(fixed):
+                if self.may_speak:
+                    self._say(fixed, len(self.shown))
+                else:
+                    self.unsaid.append((fixed, len(self.shown)))
+
+    def _say(self, piece: str, end: int) -> None:
+        if not speech_mod.speakable(piece):
+            return
+        if self.stream is None:
+            self.stream = self.speech.stream(self._speaking, self._heard)
+        self.stream.add(piece, (self.tries, end))
+
+    def _heard(self, tag, seconds: float) -> None:
+        """A piece starts to sound: its words come out while it does (one
+        from a try that was dropped has nothing left on screen)."""
+        tries, end = tag
+        if self is LiveReply.current and tries == self.tries:
+            self.ui(RevealTo(end, seconds))
+
+    def _speaking(self, on: bool) -> None:
+        if self.wake is not None:
+            self.wake.mute(on)
+        self.ui(Speaking(on))
+        if not on:
+            self._let_go()
+
+    def _let_go(self) -> None:
+        """The voice is done (or never started): the rest of the words come out."""
+        if self.held and self is LiveReply.current:
+            self.held = False
+            self.ui(RevealTo(None))
+
+    async def _told(self, stream) -> None:
+        """Once it's over: the first time the voice failed, say why."""
+        await stream.done()
+        if stream.failed is not None and (note := self.speech.first_failure_note(stream.failed)) is not None:
+            self.ui(Chat(ChatLine(Role.SYSTEM, note)))
 
 
 def speak(speech, wake, ui, words: str) -> None:

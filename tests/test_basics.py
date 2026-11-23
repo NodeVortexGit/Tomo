@@ -158,29 +158,15 @@ def test_a_reply_is_spoken_in_its_language_and_the_characters_voice(tmp_path):
     bulgarian, english = "Готово, звукът е на 40%.", "Done, the volume's at 40%."
     # Both languages follow the character.
     assert s.voice_for(bulgarian) == "bgtts-female"
-    assert s.voice_for(english) == "bgtts-female-en"
+    assert s.voice_for(english) == "en_GB-cori-medium"
     gender[0] = "male"
     assert s.voice_for(bulgarian) == "bgtts-male"
-    assert s.voice_for(english) == "bgtts-male-en"
+    assert s.voice_for(english) == "en_GB-alan-medium"
     # Before the model has chosen a character's voice: the female one.
     gender[0] = ""
     assert s.voice_for(bulgarian) == "bgtts-female"
-    assert s.voice_for(english) == "bgtts-female-en"
-    assert speech.Speech(Config.for_tests(tmp_path)).voice_for(english) == "bgtts-female-en"
-    # One helper speaks all four voices.
-    assert s.bgtts.args[:8] == ["--voice", "bgtts-female-en", "--voice", "bgtts-male-en",
-                                "--voice", "bgtts-female", "--voice", "bgtts-male"]
-
-
-def test_an_older_settings_files_piper_voice_gives_way_to_bgtts(tmp_path, monkeypatch):
-    from tomo.config import Config
-
-    monkeypatch.setenv("TOMO_TTS_VOICE_MALE", "en_GB-alan-medium")
-    monkeypatch.setenv("TOMO_TTS_VOICE_FEMALE", "bgtts-female-en")
-    monkeypatch.setenv("TOMO_TTS_VOICE_BG_MALE", "bgtts-male2")
-    cfg = Config.load(tmp_path)
-    assert (cfg.tts_voice_male, cfg.tts_voice_female, cfg.tts_voice_bg_male) == (
-        "bgtts-male-en", "bgtts-female-en", "bgtts-male2")
+    assert s.voice_for(english) == "en_GB-cori-medium"
+    assert speech.Speech(Config.for_tests(tmp_path)).voice_for(english) == "en_GB-cori-medium"
 
 
 def test_deleting_a_chat_takes_tomos_copies_of_its_pictures_and_no_other_file(tmp_path):
@@ -230,49 +216,40 @@ def fake_helper(path, name):
     return script
 
 
-def test_both_languages_go_to_the_one_helper_with_their_numbers_in_words(tmp_path):
+def test_each_language_goes_to_its_own_helper_and_one_failing_leaves_the_other(tmp_path):
     from tomo.config import Config
 
     gender = ["male"]
     s = speech.Speech(Config.for_tests(tmp_path), python=sys.executable, gender=lambda: gender[0])
+    s.piper.script, s.piper.args = fake_helper(tmp_path, "piper.py"), []
     s.bgtts.script, s.bgtts.args = fake_helper(tmp_path, "bgtts.py"), []
 
     async def run():
         said = [(await s.synthesize("Готово, звукът е на 40%.")).read_text(encoding="utf-8"),
-                (await s.synthesize("Done, the volume is at 40%.")).read_text(encoding="utf-8")]
+                (await s.synthesize("Done.")).read_text(encoding="utf-8")]
         gender[0] = "female"
-        said.append((await s.synthesize("It's 15:30.")).read_text(encoding="utf-8"))
+        said.append((await s.synthesize("Готово.")).read_text(encoding="utf-8"))
         with pytest.raises(RuntimeError, match="boom"):
             await s.synthesize("Това е boom, нали.")
         said.append((await s.synthesize("Още съм тук.")).read_text(encoding="utf-8"))  # the same helper, still there
         s.bgtts._stop()
         s.bgtts.script = tmp_path / "no-such-helper.py"
         with pytest.raises(RuntimeError):
-            await s.synthesize("Still here?")
+            await s.synthesize("Готово.")
+        said.append((await s.synthesize("Still here.")).read_text(encoding="utf-8"))
+        piper = s.piper._process
+        s.piper._stop()
+        await piper.wait()
         await asyncio.sleep(0)  # the pipes close on the next turn of the loop
         return said
 
     assert asyncio.run(run()) == [
         "bgtts.py|bgtts-male|Готово, звукът е на четиридесет процента.",
-        "bgtts.py|bgtts-male-en|Done, the volume is at forty percent.",
-        "bgtts.py|bgtts-female-en|It's fifteen thirty.",
+        "piper.py|en_GB-alan-medium|Done.",
+        "bgtts.py|bgtts-female|Готово.",
         "bgtts.py|bgtts-female|Още съм тук.",
+        "piper.py|en_GB-cori-medium|Still here.",
     ]
-
-
-@pytest.mark.parametrize("text, heard", [
-    ("0", "zero"), ("7", "seven"), ("13", "thirteen"), ("21", "twenty-one"), ("100", "one hundred"),
-    ("105", "one hundred five"), ("1250", "one thousand two hundred fifty"), ("1,250", "one thousand two hundred fifty"),
-    ("2026", "two thousand twenty-six"), ("3000000", "three million"),
-    ("The volume is at 40%.", "The volume is at forty percent."),
-    ("It's 9:00, not 9:05.", "It's nine o'clock, not nine oh five."),
-    ("It's 3.5 degrees.", "It's three point five degrees."),
-    ("The 2nd and 21st and 3rd and 12th.", "The second and twenty-first and third and twelfth."),
-    ("Code 007.", "Code zero zero seven."),
-    ("No digits here.", "No digits here."),
-])
-def test_digits_become_english_words_before_the_voice_reads_them(text, heard):
-    assert speech.numbers_in_english(text) == heard
 
 
 @pytest.mark.parametrize("digits, words", [

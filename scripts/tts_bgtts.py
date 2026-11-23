@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Tomo's voice, in Bulgarian and English: BgTTS-38M-V2 with MioCodec, on this
-computer's CPU.
+"""Tomo's Bulgarian voice: BgTTS-38M-V2 with MioCodec, on this computer's CPU.
 
-Runs as a long-lived child of Tomo's brain (tomo/speech.py). It answers each
-JSON line on stdin,
+Runs as a long-lived child of Tomo's brain (tomo/speech.py), the way
+tts_piper.py does for English. It answers each JSON line on stdin,
 
   {"text": "Здравей!", "out": "/path/to/file.wav", "voice": "bgtts-female"}
 
@@ -11,15 +10,13 @@ by writing the WAV file and printing {"ok": true}, or {"error": "..."}. The
 first line it prints, once it's loaded, is {"ok": true, "event": "ready"}.
 
 The model clones a voice from recordings and needs no training: a voice
-"bgtts-female" is the model's own Bulgarian samples/sample_female_bg*.wav,
-and "bgtts-female-en" its English samples/sample_female_en*.wav, reduced once
-to a speaker embedding (kept beside them, in voices/). The same goes for
-"bgtts-male" and "bgtts-male2". scripts/setup_models.py downloads the files
-this reads.
+"bgtts-female" is the model's own samples/sample_female_bg*.wav, reduced once
+to a speaker embedding (kept beside them, in voices/). scripts/setup_models.py
+downloads the files this reads.
 
 Try it:
   echo '{"text": "Здравей!", "out": "hi.wav", "voice": "bgtts-male"}' |
-    tts_bgtts.py --voice bgtts-female --voice bgtts-male --voice bgtts-male-en --models-dir <data>/models
+    tts_bgtts.py --voice bgtts-female --voice bgtts-male --models-dir <data>/models
 """
 
 import argparse
@@ -32,8 +29,7 @@ MODEL_FOLDER = "bgtts-38m-v2"
 CODEC_FOLDER = "miocodec-25hz-24khz"
 TORCH_FOLDER = "torch"  # MioCodec also builds on torchaudio's WavLM, which torch keeps here
 VOICE_PREFIX = "bgtts-"
-ENGLISH = "-en"  # a voice cloned from the English samples ends so
-LOUDEST = 0.9  # the model speaks quietly, and each voice differently
+LOUDEST = 0.9  # the model speaks quietly and each voice differently; Piper is about this loud
 # The model's own recommendations.
 TEMPERATURE, TOP_K, TOP_P, REPETITION_PENALTY = 0.3, 250, 0.95, 1.1
 MAX_CHUNK = 250  # characters the text encoder takes at once (its limit is 256, with two markers)
@@ -66,19 +62,17 @@ def load_codec(folder):
 
 
 def voice_embedding(name, folder, codec):
-    """The speaker embedding of a voice: the mean over its samples, in the
-    voice's language."""
+    """The speaker embedding of a voice: the mean over its Bulgarian samples."""
     import numpy as np
     import soundfile
     import torch
     import torchaudio
 
     who = name.removeprefix(VOICE_PREFIX)
-    language = "en" if who.endswith(ENGLISH) else "bg"
     saved = folder / "voices" / f"{who}.npy"
     if saved.exists():
         return torch.from_numpy(np.load(saved, allow_pickle=False))
-    samples = sorted((folder / "samples").glob(f"sample_{who.removesuffix(ENGLISH)}_{language}*.wav"))
+    samples = sorted((folder / "samples").glob(f"sample_{who}_bg*.wav"))
     if not samples:
         raise FileNotFoundError(f"no samples for the voice {name} in {folder}")
     each = []
@@ -117,7 +111,7 @@ def synthesize(text, embedding, model, tokenizer, codec):
 def main():
     global reply_to
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--voice", required=True, action="append", help="bgtts-female, bgtts-male or bgtts-male2, in English with -en")
+    parser.add_argument("--voice", required=True, action="append", help="bgtts-female, bgtts-male or bgtts-male2")
     parser.add_argument("--models-dir", required=True, type=Path, help="Tomo's models folder")
     args = parser.parse_args()
     # Tomo writes UTF-8; Windows would read it in its ANSI code page, turning
@@ -140,7 +134,7 @@ def main():
         tokenizer = TTSTokenizer()
         voices = {name: voice_embedding(name, folder, codec) for name in args.voice}
     except Exception as error:  # report, don't traceback: the brain reads stdout
-        reply(error=f"couldn't load the voice: {error}")
+        reply(error=f"couldn't load the Bulgarian voice: {error}")
         return 1
     reply(ok=True, event="ready")
 

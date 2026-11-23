@@ -5,8 +5,8 @@
 как GitHub проверява и сглобява всичко.
 
 1. pyproject.toml — ПАКЕТИТЕ
-  Основни (мозък + тяло): httpx, python-dotenv, chromadb, numpy, pillow,
-    glfw, moderngl, imgui-bundle.
+  Основни (мозък + тяло): httpx, python-dotenv, chromadb, numpy, spylls,
+    pillow, glfw, moderngl, imgui-bundle.
   Допълнения:
     speech — piper-tts, torch, torchaudio, soundfile, miocodec (от GitHub, на
              фиксиран commit), vosk, onnx-asr[cpu,hub], sounddevice (без Linux);

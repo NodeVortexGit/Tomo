@@ -12,7 +12,7 @@ Each character has a voice, male or female, which the model chooses: the
 first time a character appears, it's shown the character's picture (the
 thumbnail inside the .vrm) and name and calls ``set_voice`` (see ai.py);
 the user can have it changed any time by asking. speech.py turns the choice
-into a voice, in English and in Bulgarian.
+into a Piper voice.
 """
 
 from __future__ import annotations

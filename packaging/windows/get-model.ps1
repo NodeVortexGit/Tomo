@@ -12,7 +12,8 @@
 # LLAMA_ARG_CTX_CHECKPOINTS=4 keeps few checkpoints. Ollama reads them when it
 # starts, so it has to be restarted once.
 
-param([string]$Model = "gemma4:12b-it-qat")
+param([string]$Model = "gemma4:12b-it-qat",
+      [string]$Proofreader = "hf.co/INSAIT-Institute/BgGPT-Gemma-3-4B-IT-GGUF:Q4_K_M")
 
 $ollama = (Get-Command ollama -ErrorAction SilentlyContinue).Source
 if (-not $ollama) {
@@ -45,6 +46,14 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "Downloading $Model for Ollama (a few GB, once)..." -ForegroundColor Cyan
 & $ollama pull $Model
+$pulled = $LASTEXITCODE
+# The small Bulgarian model that proofreads Tomo's Bulgarian (on the CPU).
+Write-Host "Downloading $Proofreader, which checks Tomo's Bulgarian (about 2.5 GB, once)..." -ForegroundColor Cyan
+& $ollama pull $Proofreader
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "The proofreading model didn't download; Tomo still checks its Bulgarian with rules and a dictionary." -ForegroundColor Yellow
+}
+$LASTEXITCODE = $pulled
 if ($LASTEXITCODE -ne 0) {
     Write-Host "The download didn't finish. To try again: Start menu -> Tomo -> Download a model for Tomo." -ForegroundColor Yellow
     Write-Host "(An older Ollama can't run Gemma 4: update Ollama first.)" -ForegroundColor Yellow
