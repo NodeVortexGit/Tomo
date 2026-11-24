@@ -49,7 +49,10 @@ function Install-Ollama {
     Write-Host "Downloading Ollama, which runs Tomo's models (about 1 GB, once)..." -ForegroundColor Cyan
     Invoke-WebRequest -Uri $OllamaSetupUrl -OutFile $setup -UseBasicParsing -ErrorAction Stop
     Write-Host "Installing Ollama..." -ForegroundColor Cyan
-    $run = Start-Process -FilePath $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-" -Wait -PassThru -ErrorAction Stop
+    # Waits for the installer only: -Wait would also wait for what it starts
+    # (Ollama's tray app, which keeps running).
+    $run = Start-Process -FilePath $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-" -PassThru -ErrorAction Stop
+    $run.WaitForExit()
     Remove-Item $setup -ErrorAction SilentlyContinue
     if ($run.ExitCode -ne 0) { throw "Ollama's installer stopped with code $($run.ExitCode)" }
 }

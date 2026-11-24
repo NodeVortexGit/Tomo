@@ -51,6 +51,7 @@ jobs:
           }
       - name: get-model.ps1 installs Ollama, sets it up and starts it (without the models)
         shell: powershell
+        timeout-minutes: 15
         run: |
           powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File packaging/windows/get-model.ps1 -NoModels
           if ($LASTEXITCODE -ne 0) { throw "get-model.ps1 failed" }
