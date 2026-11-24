@@ -9,7 +9,9 @@
 ; %LOCALAPPDATA%\Programs\Tomo: Tomo's Python code, the helper scripts and the
 ; characters. setup.ps1 then makes Tomo's own Python environment (.venv, with
 ; uv) and, if chosen, downloads the speech and camera models; get-model.ps1
-; gets a model for Ollama. Everything runs on the computer.
+; installs Ollama (or updates it), gives it the settings Gemma 4 needs,
+; restarts it and downloads Tomo's models — so after this installer there's
+; nothing left to set up by hand. Everything runs on the computer.
 
 #ifndef AppVersion
   #define AppVersion "0.2.0"
@@ -39,7 +41,7 @@ CloseApplications=yes
 
 [Tasks]
 Name: "models"; Description: "Set up Tomo's voice, ""Hey Tomo"" and the health programme's camera (downloads the models, about 2 GB, once)"
-Name: "model"; Description: "Download the model Tomo thinks with, for Ollama (Gemma 4 12B QAT, about 7.2 GB; needs Ollama 0.30.5 or newer)"
+Name: "model"; Description: "Install Ollama (if it isn't there) and the models Tomo thinks with: Gemma 4 12B QAT and BgGPT, which checks Tomo's Bulgarian (about 11 GB, once)"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 Name: "autostart"; Description: "Start Tomo when I sign in"; Flags: unchecked
 
@@ -62,7 +64,7 @@ Source: "get-model.ps1"; DestDir: "{app}\tools"; Flags: ignoreversion
 [Icons]
 Name: "{group}\Tomo"; Filename: "{app}\.venv\Scripts\pythonw.exe"; Parameters: "-m tomo"; WorkingDir: "{app}"
 Name: "{group}\Set up Tomo's voice and camera"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\setup.ps1"" -Models"; WorkingDir: "{app}"
-Name: "{group}\Download a model for Tomo"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\get-model.ps1"""; WorkingDir: "{app}"
+Name: "{group}\Download Tomo's models"; Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\get-model.ps1"""; WorkingDir: "{app}"
 Name: "{group}\Tomo settings"; Filename: "notepad.exe"; Parameters: """{app}\.env"""
 Name: "{group}\Uninstall Tomo"; Filename: "{uninstallexe}"
 Name: "{userdesktop}\Tomo"; Filename: "{app}\.venv\Scripts\pythonw.exe"; Parameters: "-m tomo"; WorkingDir: "{app}"; Tasks: desktopicon
@@ -72,7 +74,7 @@ Name: "{userstartup}\Tomo"; Filename: "{app}\.venv\Scripts\pythonw.exe"; Paramet
 ; Tomo's Python environment is always needed; the models only if chosen.
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\setup.ps1"""; WorkingDir: "{app}"; StatusMsg: "Setting up Tomo's Python (about 1.2 GB, once)..."; Flags: waituntilterminated; Tasks: not models
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\setup.ps1"" -Models"; WorkingDir: "{app}"; StatusMsg: "Setting up Tomo's Python, voice and camera (about 3.2 GB, once)..."; Flags: waituntilterminated; Tasks: models
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\get-model.ps1"""; WorkingDir: "{app}"; StatusMsg: "Getting a model for Ollama..."; Flags: waituntilterminated; Tasks: model
+Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\get-model.ps1"""; WorkingDir: "{app}"; StatusMsg: "Installing Ollama and downloading Tomo's models (about 11 GB, once)..."; Flags: waituntilterminated; Tasks: model
 Filename: "{app}\.venv\Scripts\pythonw.exe"; Parameters: "-m tomo"; Description: "Start Tomo"; WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent
 
 [UninstallDelete]

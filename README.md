@@ -58,7 +58,8 @@ Tomo е настолно приложение за Windows и Linux — асис
 - Windows 10/11 или Linux
 - [Ollama](https://ollama.com/download) 0.30.5 или по-нова и моделът
   `gemma4:12b-it-qat` (около 7,2 GB), а за проверката на българския —
-  `hf.co/INSAIT-Institute/BgGPT-Gemma-3-4B-IT-GGUF:Q4_K_M` (около 2,5 GB)
+  `hf.co/INSAIT-Institute/BgGPT-Gemma-3-4B-IT-GGUF:Q4_K_M` (около 2,5 GB).
+  В Windows инсталаторът на Tomo ги слага сам
 - Препоръчително: видеокарта с поне 8 GB памет и 16 GB оперативна памет
 - Около 15 GB свободно място на диска
 - Интернет — само докато се инсталира
@@ -66,25 +67,24 @@ Tomo е настолно приложение за Windows и Linux — асис
 
 ### Стъпки за стартиране (Windows)
 
-1. Инсталирайте Ollama.
-2. Задайте двете настройки на Ollama, без които Gemma може да „замръзне“ (в
-   PowerShell), и рестартирайте Ollama:
-   ```powershell
-   [Environment]::SetEnvironmentVariable("LLAMA_ARG_CACHE_RAM", "0", "User")
-   [Environment]::SetEnvironmentVariable("LLAMA_ARG_CTX_CHECKPOINTS", "4", "User")
-   ```
-3. Изтеглете моделите: `ollama pull gemma4:12b-it-qat` и
-   `ollama pull hf.co/INSAIT-Institute/BgGPT-Gemma-3-4B-IT-GGUF:Q4_K_M`.
-4. Пуснете инсталатора `Tomo-Setup-<версия>.exe` (от страницата *Releases*
-   или като артефакт `Tomo-Setup-windows` от GitHub Actions) и отметнете
-   гласа и камерата. Той сам изтегля моделите за реч (около 2 GB).
-5. Стартирайте **Tomo** от менюто „Старт“ и кликнете върху персонажа, за да
+1. Изтеглете `Tomo-Setup-<версия>.exe` (от страницата *Releases* или като
+   артефакт `Tomo-Setup-windows` от GitHub Actions).
+2. Пуснете го и оставете всички отметки. Той сам инсталира всичко: Ollama
+   (ако го няма), настройките му, моделите Gemma и BgGPT, гласа и камерата
+   — около 14 GB, само веднъж, затова отнема време. Не е нужно нищо да се
+   прави на ръка.
+3. Стартирайте **Tomo** от менюто „Старт“ и кликнете върху персонажа, за да
    отворите чата.
 
 ### Стъпки за стартиране (Linux или от изходния код)
 
-1. Инсталирайте Ollama, задайте двете настройки от стъпка 2 по-горе (в
-   Linux — с `sudo systemctl edit ollama`) и изтеглете модела.
+1. Инсталирайте Ollama и му задайте двете настройки, без които Gemma може да
+   „замръзне“: `LLAMA_ARG_CACHE_RAM=0` и `LLAMA_ARG_CTX_CHECKPOINTS=4` (в
+   Linux — със `sudo systemctl edit ollama`, като редове
+   `Environment="LLAMA_ARG_CACHE_RAM=0"` и
+   `Environment="LLAMA_ARG_CTX_CHECKPOINTS=4"` под `[Service]`), рестартирайте
+   го и изтеглете моделите: `ollama pull gemma4:12b-it-qat` и
+   `ollama pull hf.co/INSAIT-Institute/BgGPT-Gemma-3-4B-IT-GGUF:Q4_K_M`.
 2. Изтеглете проекта: `git clone https://github.com/NodeVortexGit/Tomo.git tomo`
    и `cd tomo`.
 3. В Linux: `./install.sh` (инсталира всичко нужно). От изходния код, в

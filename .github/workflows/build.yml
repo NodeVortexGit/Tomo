@@ -36,9 +36,34 @@ jobs:
       - name: Tests
         run: uv run --no-sync pytest -q
 
+  ollama:
+    name: Ollama installs by itself (Windows)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: The installer's scripts parse in Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          foreach ($script in Get-ChildItem packaging/windows/*.ps1) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors) { $errors | ForEach-Object { Write-Host "$($script.Name): $_" }; throw "$($script.Name) doesn't parse" }
+          }
+      - name: get-model.ps1 installs Ollama, sets it up and starts it (without the models)
+        shell: powershell
+        run: |
+          powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File packaging/windows/get-model.ps1 -NoModels
+          if ($LASTEXITCODE -ne 0) { throw "get-model.ps1 failed" }
+          $ollama = Join-Path $env:LOCALAPPDATA "Programs\Ollama\ollama.exe"
+          if (-not (Test-Path $ollama)) { throw "ollama.exe isn't installed" }
+          & $ollama --version
+          foreach ($name in "LLAMA_ARG_CACHE_RAM", "LLAMA_ARG_CTX_CHECKPOINTS") {
+            if (-not [Environment]::GetEnvironmentVariable($name, "User")) { throw "$name wasn't set" }
+          }
+
   installer:
     name: Windows installer
-    needs: test
+    needs: [test, ollama]
     runs-on: windows-2022
     permissions:
       contents: write # to attach the installer to a release
