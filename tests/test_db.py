@@ -212,9 +212,9 @@ def test_a_vrm_tells_its_name_authors_and_picture(tmp_path):
 
 
 def test_the_bundled_character_has_a_picture_to_choose_a_voice_by():
-    bundled = Path(__file__).resolve().parent.parent / "assets" / "characters" / "female_refined.vrm"
+    bundled = Path(__file__).resolve().parent.parent / "assets" / "characters" / "female model.vrm"
     facts, thumbnail = characters.vrm_facts(bundled)
-    assert facts["name"] == "female refined" and thumbnail[:8] == b"\x89PNG\r\n\x1a\n"
+    assert facts["name"] == "female model" and thumbnail[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_the_store_survives_a_reopen(tmp_path):

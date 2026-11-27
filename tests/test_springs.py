@@ -123,7 +123,7 @@ def test_tips_are_pushed_out_of_colliders_and_keep_their_length():
 
 @pytest.fixture(scope="module")
 def female():
-    path = CHARACTERS / "female_refined.vrm"
+    path = CHARACTERS / "female model.vrm"
     if not path.is_file():
         pytest.skip("the bundled character isn't there")
     return vrm.load(path)

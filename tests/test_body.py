@@ -39,7 +39,7 @@ def points(*items) -> list[Joint]:
 # ---- the model ----------------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module", params=["female_refined.vrm", "Kiyotaka Ayanokōji.vrm"])
+@pytest.fixture(scope="module", params=["female model.vrm", "Kiyotaka Ayanokōji.vrm"])
 def model(request):
     path = CHARACTERS / request.param
     if not path.is_file():
@@ -49,7 +49,7 @@ def model(request):
 
 def test_a_vrm_loads_whole(model):
     assert model.version == "1.0"
-    assert model.skins and all(len(s.joints) == len(s.inverse_bind) for s in model.skins)
+    assert len(model.skins) == 3 and all(len(s.joints) == len(s.inverse_bind) for s in model.skins)
     for mesh in model.meshes:
         for p in mesh.primitives:
             v = p.vertices
@@ -58,7 +58,7 @@ def test_a_vrm_loads_whole(model):
             assert np.allclose(v.weights.sum(axis=1), 1.0, atol=1e-4)
     face = next(m for m in model.meshes if m.primitives[0].vertices.targets)
     assert len(face.primitives[0].vertices.targets) == 57
-    assert all(len(p.vertices.targets) == 57 for p in face.primitives), "every part of the face moves with it"
+    assert all(p.vertices is face.primitives[0].vertices for p in face.primitives), "one vertex set, shared"
     assert {"hips", "head", "leftUpperArm", "rightLowerLeg"} <= set(model.humanoid)
     assert {"blink", "aa", "oh", "happy"} <= set(model.expressions)
 
